@@ -1,0 +1,51 @@
+{
+  "name": "olmdb",
+  "version": "0.1.1",
+  "description": "Optimistic LMDB. A very fast embedded key/value store featuring ACID transactions using optimistic locking, based on LMDB.",
+  "main": "src/olmdb.ts",
+  "type": "module",
+  "exports": {
+    ".": "./src/olmdb.ts",
+    "./lowlevel": {
+      "types": "./src/lowlevel.d.ts",
+      "import": "./build/Release/olmdb_lowlevel.node"
+    }
+  },
+  "files": [
+    "src",
+    "dist",
+    "build/Release/olmdb_lowlevel.node"
+  ],
+  "scripts": {
+    "prepare": "node-gyp rebuild",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "npm run test:bun && npm run test:node",
+    "test:bun": "bun test",
+    "test:node": "jest --verbose"
+  },
+  "keywords": [
+    "key-value-store",
+    "embedded",
+    "in-process",
+    "database",
+    "datastore",
+    "lmdb",
+    "acid",
+    "mvcc",
+    "transactions",
+    "nosql",
+    "bun",
+    "nodejs"
+  ],
+  "author": "Frank van Viegen",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/bun": "^1.2.16",
+    "@types/node": "^22.10.6",
+    "jest": "^30.0.3",
+    "node-gyp": "^11.2.0",
+    "ts-jest": "^29.2.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
