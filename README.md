@@ -3,11 +3,13 @@
 
 OLMDB is a high-performance, embedded database that combines the speed and reliability of LMDB with optimistic concurrency control. It provides ACID transactions with automatic retry logic for handling concurrent access patterns, making it ideal for applications that need performance, consistency and parallel (long running) read/write transactions.
 
-## Features
+**Features:**
+
 - 🚀 **High Performance**: Built on LMDB, one of the fastest embedded databases, providing zero-copy data access.
 - 🔒 **ACID Transactions**: Full transaction support with optimistic locking and built-in retry for race conditions.
 - 📦 **Zero Dependencies**: Minimal footprint, running on both Node and Bun.
 - 🔧 **Simple API**: Fully typed, fast synchronous database reads, promise-based commits.
+
 
 ## Quick Demo
 ```typescript
@@ -46,6 +48,7 @@ async function main() {
 main().catch(console.error);
 ```
 
+
 ## Installation
 ```bash
 npm install olmdb
@@ -56,46 +59,6 @@ npm install olmdb
 - Standard build tools (GCC/G++, make) for native compilation via node-gyp
 - Python 3.x (required by node-gyp)
 
-## Architecture
-
-### Components
-OLMDB consists of two parts:
-- A TypeScript file providing the recommended high-level API for this library. This adds automatic transaction retries (in case of race conditions), an implicit transaction context, promise-based transactions and type conversions.
-- A native module, providing a low-level API on which the former is built.
-
-### Transactions
-The native module manages transactions (start, commit, abort), and all read (get, scan) and write (put, del) operations must happen within such a transaction. Multiple transactions can run simultaneously from the same JavaScript process, allowing work for different clients to be interleaved (using async/await or callbacks). 
-
-### Reads
-For each OLMDB transaction, a corresponding read-only LMDB transaction is created. That gives us a consistent snapshot view of the store, from which all reads (get, scan) are done. For every read from LMDB, we log into memory associated with the transaction which key was read and a checksum of its value. We'll use this for commits, as explained below.
-
-### Writes
-When writes (put, del) are performed, they are initially only stored in-memory in a buffer local to this transaction. Any further reads will first search the buffer, before consulting the underlying LMDB store, such that a transaction can read back its own writes. The buffer is organized as a skiplist, making searching the buffer very fast even when a transaction contains many writes.
-
-### Aborts and commits
-If a transaction is aborted, the write buffer is just discarded and nothing is saved to LMDB. In case of a read-only transaction commit, we do the same. This happens synchronously. For read/write commits, we queue the transaction, including its read and write buffers for processing by the *write-commit thread* (explained below). Once a commit has been processed, its callback function is invoked with the commit status as an argument (from the main thread).
-
-### Write-commit thread
-Once one or more read/write commits have been queued, the write-commit thread will start a read/write LMDB transaction. Note that LMDB only allows for a single read/write transaction at a time, so that's why we do this from a single thread and we try to process transactions as quickly as we can.
-
-Within a single LMDB transaction, we can run a bunch of OLMDB transactions as follows:
-
-1. First replay all of the *reads* the transaction has performed (and stored in the read buffer) in its initial phase, verifying that the results are still the same based on the stored checksums. If not, the transaction has been raced by another transaction. Writes for this transaction will not be performed, and the 'raced' status is communicated back to committing code.
-2. All of the writes are performed on LMDB. This should never fail, under normal circumstances. The 'success' status is communicated back to the committing code. 
-
-After a batch of OLMDB transactions has been processed, the LMDB transaction is committed, and work can be started on the next batch. Batching commits can help write performance, as writes to pages in the top regions of b-tree can often be shared between transactions.
-
-### Retryable transactions
-The high-level API, written in TypeScript provides a `transact(func)` method that runs a function within the context of an OLMDB transaction. This transaction context is preserved in [AsyncLocalStorage](https://nodejs.org/api/async_context.html#class-asynclocalstorage), so that you can just call functions like `put` and `get` without having to pass along a transaction object. This can be convenient when database accesses are deeply nested.
-
-After the provided function is done running, `transact()` does an OLMDB commit, and (for read/write transactions) registers a callback function. In case it gets called with a 'raced' status, the function will be executed again within a new transaction context. This happens up to three times before giving up.
-
-### Scaling
-LMDB allows multiple processes (on the same machine) to safely operate on the same database file. However, only one read/write transaction will be allowed to run at a time. So when scaling your deployment by creating multiple JavaScript processes, each of these will create its own worker thread, but only one of them will be committing transactions at a time. Given the trade-offs that LMDB makes, this is close to the best we can do (though coordinating between processes to share a single write-commit thread may be slightly more efficient, but a lot more complex/fragile).
-
-I expect this architecture to be able to provide huge throughput and very low latencies, though actual performance tests haven't been done yet.
-
-In case you eventually need to scale beyond a single server, that can only be done at the application level. 
 
 ## High-level API Tutorial
 
@@ -258,6 +221,49 @@ What this demonstrates is a race condition, gracefully handled by a retry:
 - On write-commit, the result1 transaction notices that `counter` has changed since it has read it, invalidating the transaction, and running the provided function again. This time it reads 52 instead of 42.
 
 OLMDB retries a transaction 3 times before giving up (and throwing an exception).
+
+
+## Architecture
+
+### Components
+OLMDB consists of two parts:
+- A TypeScript file providing the recommended high-level API for this library. This adds automatic transaction retries (in case of race conditions), an implicit transaction context, promise-based transactions and type conversions.
+- A native module, providing a low-level API on which the former is built.
+
+### Transactions
+The native module manages transactions (start, commit, abort), and all read (get, scan) and write (put, del) operations must happen within such a transaction. Multiple transactions can run simultaneously from the same JavaScript process, allowing work for different clients to be interleaved (using async/await or callbacks). 
+
+### Reads
+For each OLMDB transaction, a corresponding read-only LMDB transaction is created. That gives us a consistent snapshot view of the store, from which all reads (get, scan) are done. For every read from LMDB, we log into memory associated with the transaction which key was read and a checksum of its value. We'll use this for commits, as explained below.
+
+### Writes
+When writes (put, del) are performed, they are initially only stored in-memory in a buffer local to this transaction. Any further reads will first search the buffer, before consulting the underlying LMDB store, such that a transaction can read back its own writes. The buffer is organized as a skiplist, making searching the buffer very fast even when a transaction contains many writes.
+
+### Aborts and commits
+If a transaction is aborted, the write buffer is just discarded and nothing is saved to LMDB. In case of a read-only transaction commit, we do the same. This happens synchronously. For read/write commits, we queue the transaction, including its read and write buffers for processing by the *write-commit thread* (explained below). Once a commit has been processed, its callback function is invoked with the commit status as an argument (from the main thread).
+
+### Write-commit thread
+Once one or more read/write commits have been queued, the write-commit thread will start a read/write LMDB transaction. Note that LMDB only allows for a single read/write transaction at a time, so that's why we do this from a single thread and we try to process transactions as quickly as we can.
+
+Within a single LMDB transaction, we can run a bunch of OLMDB transactions as follows:
+
+1. First replay all of the *reads* the transaction has performed (and stored in the read buffer) in its initial phase, verifying that the results are still the same based on the stored checksums. If not, the transaction has been raced by another transaction. Writes for this transaction will not be performed, and the 'raced' status is communicated back to committing code.
+2. All of the writes are performed on LMDB. This should never fail, under normal circumstances. The 'success' status is communicated back to the committing code. 
+
+After a batch of OLMDB transactions has been processed, the LMDB transaction is committed, and work can be started on the next batch. Batching commits can help write performance, as writes to pages in the top regions of b-tree can often be shared between transactions.
+
+### Retryable transactions
+The high-level API, written in TypeScript provides a `transact(func)` method that runs a function within the context of an OLMDB transaction. This transaction context is preserved in [AsyncLocalStorage](https://nodejs.org/api/async_context.html#class-asynclocalstorage), so that you can just call functions like `put` and `get` without having to pass along a transaction object. This can be convenient when database accesses are deeply nested.
+
+After the provided function is done running, `transact()` does an OLMDB commit, and (for read/write transactions) registers a callback function. In case it gets called with a 'raced' status, the function will be executed again within a new transaction context. This happens up to three times before giving up.
+
+### Scaling
+LMDB allows multiple processes (on the same machine) to safely operate on the same database file. However, only one read/write transaction will be allowed to run at a time. So when scaling your deployment by creating multiple JavaScript processes, each of these will create its own worker thread, but only one of them will be committing transactions at a time. Given the trade-offs that LMDB makes, this is close to the best we can do (though coordinating between processes to share a single write-commit thread may be slightly more efficient, but a lot more complex/fragile).
+
+I expect this architecture to be able to provide huge throughput and very low latencies, though actual performance tests haven't been done yet.
+
+In case you eventually need to scale beyond a single server, that can only be done at the application level. 
+
 
 ## High-Level API Reference
 
@@ -490,6 +496,7 @@ for (const { key, value } of scan({
 #### `Data`
 Union type for keys and values: `Uint8Array | ArrayBuffer | string`
 
+
 ## Low-Level API example
 
 The low-level API provides direct access to the native LMDB bindings. **Use the high-level API unless you have some very specific requirements.**
@@ -535,7 +542,8 @@ lowlevel.closeIterator(iteratorId);
 lowlevel.abortTransaction(txnId2);
 ```
 
-### Low-Level API Reference
+
+## Low-Level API Reference
 
 #### Database Management
 - **`open(directory?)`**: Initialize database at specified directory. Defaults to `$OLMDB_DIR` environment variable or `./.olmdb`. Throws `DatabaseError` if already open or directory creation fails.
@@ -562,6 +570,7 @@ Keys and values are `ArrayBuffer` objects.
 The iterator id `iteratorId` is a number (within the 32 bit integer range). The `reverse` flag is a boolean, defaulting to false.
 
 **Note**: Iterators are automatically closed when their transaction ends, when they're exhausted by reading all items, or when manually closed. You can close iterators early if you don't iterate to completion to free resources immediately.
+
 
 ## License
 

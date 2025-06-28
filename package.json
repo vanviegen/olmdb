@@ -1,6 +1,6 @@
 {
   "name": "olmdb",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Optimistic LMDB. A very fast embedded key/value store featuring ACID transactions using optimistic locking, based on LMDB.",
   "main": "src/olmdb.ts",
   "type": "module",
@@ -17,11 +17,12 @@
     "build/Release/olmdb_lowlevel.node"
   ],
   "scripts": {
-    "prepare": "node-gyp rebuild",
+    "prepare": "npx node-gyp rebuild",
     "build": "tsc -p tsconfig.build.json",
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",
-    "test:node": "jest --verbose"
+    "test:node": "jest --verbose",
+    "prepack": "bun run prepare && bun run test && bun run build"
   },
   "keywords": [
     "key-value-store",
