@@ -16,11 +16,10 @@
   },
   "files": [
     "src",
-    "dist",
-    "build/Release/olmdb_lowlevel.node"
+    "dist"
   ],
   "scripts": {
-    "prepare": "npx node-gyp rebuild",
+    "prepare": "npx node-gyp rebuild --debug && cp build/Debug/olmdb_lowlevel.node dist/olmdb_lowlevel_debug.node && npx node-gyp rebuild --release && cp build/Release/olmdb_lowlevel.node dist/olmdb_lowlevel_release.node",
     "build": "rm -rf dist ; tsc",
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",

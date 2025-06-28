@@ -1,9 +1,9 @@
 import { dlopen } from "process";
-import path from "node:path";
 import os from "node:os";
 
 const lowlevel = {} as any;
-dlopen({exports: lowlevel}, path.join(__dirname,"../build/Release/olmdb_lowlevel.node"), os.constants.dlopen.RTLD_NOW);
+const mode = process.env.OLMDB_DEBUG ? "debug" : "release";
+dlopen({exports: lowlevel}, `${__dirname}/../dist/olmdb_lowlevel_${mode}.node`, os.constants.dlopen.RTLD_NOW);
 
 
 export interface DatabaseError extends Error {
