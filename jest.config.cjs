@@ -5,9 +5,7 @@ module.exports = {
   testEnvironment: 'node',
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   transform: {
-    '^.+\\.ts$': ['ts-jest', {
-      tsconfig: 'tsconfig.jest.json'
-    }],
+    '^.+\\.ts$': ['ts-jest'],
   },
   collectCoverageFrom: [
     'src/**/*.{ts,tsx}',

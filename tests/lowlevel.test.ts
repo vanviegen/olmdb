@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, beforeAll } from "@jest/globals";
 const lowlevel = require("../build/Release/olmdb_lowlevel.node");
 
 // Helper functions
-function stringToArrayBuffer(str: string): ArrayBufferLike{
+function stringToArrayBuffer(str: string): ArrayBufferLike {
     const encoder = new TextEncoder();
     return encoder.encode(str).buffer;
 }
@@ -33,7 +33,7 @@ describe('Lowlevel Tests', () => {
     beforeAll(async () => {
         try {
             lowlevel.open("./.olmdb_test");
-        } catch (error) {
+        } catch (error: any) {
             if (error.code !== "ALREADY_OPEN") {
                 throw error; // Rethrow if it's not the expected error
             }

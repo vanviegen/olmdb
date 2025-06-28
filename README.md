@@ -115,6 +115,7 @@ await transact(() => {
   const asBytes = get('text');        // Uint8Array (zero-copy!)
   const asBuffer = getBuffer('text'); // ArrayBuffer (zero-copy!)
   const asString = getString('text'); // "Hello World" (decoded)
+  console.log(asBytes, asBuffer, asString);
 });
 ```
 
@@ -154,11 +155,11 @@ transact(() => {
   }
   
   // Collection helper methods
-  let xs = scan().map((kv) => kv.key.contains('x')).toArray();
+  let xs = scan({keyConvert: asString}).map((kv) => kv.key.includes('x')).toArray();
   console.log(xs);
   
   // Manual iterator control
-  const iterator = scan({ start: 'prefix:' });
+  const iterator = scan({start: 'prefix:'});
   const first = iterator.next();
   if (!first.done) {
     console.log('First entry:', first.value);
@@ -172,7 +173,7 @@ transact(() => {
 
 ### Transaction retries
 ```typescript
-import { transact } from 'olmdb';
+import { transact, put, getString } from 'olmdb';
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));

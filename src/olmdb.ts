@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "async_hooks";
-// Load the native module
-const lowlevel = require("../build/Release/olmdb_lowlevel.node");
-export const { DatabaseError } = lowlevel;
+import * as lowlevel from "./lowlevel";
+const { DatabaseError } = lowlevel;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -310,7 +309,7 @@ export class DbIterator<K,V> extends Iterator<DbEntry<K,V>,undefined> implements
  */
 export function scan<K = Uint8Array,V = Uint8Array>(opts: ScanOptions<K,V> = {}): DbIterator<K,V> {
     const transaction = getTransaction();
-    const iteratorId = lowlevel.createIterator(transaction.id, opts.start && toBuffer(opts.start), opts.end && toBuffer(opts.end), opts.reverse || false);
+    const iteratorId = lowlevel.createIterator(transaction.id, opts.start==null ? undefined : toBuffer(opts.start), opts.end==null ? undefined : toBuffer(opts.end), opts.reverse || false);
     return new DbIterator(iteratorId,
         opts.keyConvert || asArray as (b: ArrayBuffer) => K,
         opts.valueConvert || asArray as (b: ArrayBuffer) => V

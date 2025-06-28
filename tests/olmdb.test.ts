@@ -1,4 +1,4 @@
-import { open, put, get, getString, transact, del, scan, asString, DatabaseError } from '../src/olmdb';
+import { open, put, get, getString, transact, del, scan, asString } from '../src/olmdb';
 import { expect, test, describe, beforeEach, beforeAll } from "@jest/globals";
 
 let state: string = 'initial';
@@ -30,7 +30,7 @@ describe('LMDB', () => {
     beforeAll(async () => {
         try {
             open("./.olmdb_test");
-        } catch (error) {
+        } catch (error: any) {
             if (error.code !== "ALREADY_OPEN") {
                 throw error; // Rethrow if it's not the expected error
             }
@@ -189,12 +189,14 @@ describe('LMDB', () => {
 
     test("should handle large values", async () => {
         const value = new Uint8Array(1024 * 1024); // 1MB of 'random' binary data
+        // For some reason, this loop take 2 seconds on Node 24, but only a few milliseconds on Bun:
         for (let i = 0; i < value.length; i++) {
             value[i] = i % 256;
         }
 
         await transact(() => {
             put('large-test', value);
+            // This takes 1,5 seconds on Node 24, and barely any time on Bun:        
             expect(get('large-test')).toEqual(value);
         });
 
@@ -202,6 +204,7 @@ describe('LMDB', () => {
             return get('large-test');
         });
 
+        // This takes 1,5 seconds on Node 24, and barely any time on Bun:
         expect(result).toEqual(value);
     });
 

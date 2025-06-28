@@ -1,11 +1,11 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
-    "lib": ["ES2020", "DOM", "ESNext.Iterator"],
-    "declaration": true,
-    "outDir": "./dist",
+    "module": "ES2022",
     "rootDir": "./src",
+    "outDir": "./dist",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "ESNext.Iterator"],
+    "declaration": true,
     "strict": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
@@ -13,9 +13,10 @@
     "emitDecoratorMetadata": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
     "moduleResolution": "node",
-    "resolveJsonModule": true
+    "incremental": false
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
