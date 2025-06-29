@@ -1,5 +1,6 @@
 .olmdb
 .olmdb_test
+.olmdb_benchmark
 package-lock.json
 dist
 node_modules
