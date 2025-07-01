@@ -349,8 +349,7 @@ const result = await transact(() => {
 
 **Throws:**
 - `TypeError`: If nested transactions are attempted
-- `DatabaseError` with code `RACING_TRANSACTION`: If transaction fails after 3 retries due to conflicts
-- `DatabaseError` with code `TRANSACTION_FAILED`: If transaction fails for other reasons
+- `DatabaseError` with code `RACING_TRANSACTION`: If transaction fails after 3 retries due to conflicts (or errors)
 - `DatabaseError` with code `TXN_LIMIT`: If maximum number of transactions is reached
 - `DatabaseError` with code `LMDB-{code}`: For LMDB-specific errors
 
@@ -523,8 +522,6 @@ const isAsync = lowlevel.commitTransaction(txnId, (transactionId, status) => {
     console.log('Transaction committed successfully');
   } else if (status === lowlevel.TRANSACTION_RACED) {
     console.log('Transaction raced - would need manual retry');
-  } else if (status === lowlevel.TRANSACTION_FAILED) {
-    console.log('Transaction failed');
   }
 });
 

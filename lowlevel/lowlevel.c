@@ -1,28 +1,24 @@
 /**
  * See the architecture section in README.md before delving into this code.
- * 
- * Import abbreviations:
- * - ltxn: An OLMDB logical transaction, which is what our user works with
- * - rtxn: An LMDB read-only transaction, used during the initial phase of one or more logical transactions
- * - wtxn: An LMDB read/write transaction, used in the commit phase of one or more logical transaction
  */
-
-#include "lmdb.h"
-#include <node_api.h>
+#define _GNU_SOURCE // For memfd_create
+#include <sys/mman.h>
+#include "commit_worker.c"
+#include "lowlevel-internal.h"
+#include "lowlevel.h"
+#include <assert.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
-#include <errno.h>
-#include <stdatomic.h>
+#include <sys/un.h>
 #include <time.h>
-#include <stddef.h>
-#include <assert.h>
-
-#include <stdio.h>
-#include <time.h>
+#include <unistd.h>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -30,123 +26,33 @@
 #else
     #include <sys/time.h>
 #endif
-
+#include <linux/limits.h>
 
 // Configuration constants
+#define SHARED_MEMORY_SIZE (4ULL * 1024 * 1024 * 1024) // 4 GB shared memory size
 #define MAX_LTXNS 0x100000
-#define MAX_ITERATORS 0x10000
-#define DEFAULT_LOG_BUFFER_SIZE (32 * 1024 - sizeof(log_buffer_t))
+#define MAX_ITERATORS 0x100000
+#define DEFAULT_LOG_BUFFER_SIZE (64 * 1024)
 #define MAX_KEY_LENGTH 511
 #define SKIPLIST_DEPTH 4
 #define MAX_RTXNS 254
-
-// For use by our checksum hash function (simple FNV-1a)
-#define CHECKSUM_INITIAL 0xcbf29ce484222325ULL
-#define CHECKSUM_PRIME 0x100000001b3ULL
-
-typedef struct {
-    union read_log_struct *tagged_next_ptr; // tagged as 0 in the lowest 3 bits
-    uint64_t checksum;
-    uint16_t key_size;
-    char key_data[];  // Variable length
-} get_log_t;
-
-typedef struct {
-    union read_log_struct *tagged_next_ptr; // bit 0 is 1. bit 1 is 0 for forwards, 1 for backwards.
-    uint64_t checksum;
-    uint32_t row_count; // Number of additional rows (excluding the initial one) that this iterator has read, and have been included in checksum
-    uint16_t key_size;
-    char key_data[];  // Variable length
-} iterate_log_t;
-
-// Union containing all entry types
-typedef union read_log_struct {
-    // Base structure for all entries
-    union read_log_struct *tagged_next_ptr; // ignore the lowest 3 bits
-    uintptr_t tag;  // Type info in the lowest 3 bits
-    get_log_t get;
-    iterate_log_t iterate;
-} __attribute__((aligned(8))) read_log_t;
-
-typedef struct update_log_struct {
-    struct update_log_struct *next_ptrs[SKIPLIST_DEPTH];
-    struct update_log_struct *prev_ptr;
-    uint32_t value_size;
-    uint16_t key_size;
-    char data[]; // key data + value data
-} __attribute__((aligned(8))) update_log_t;
-
-// Buffer structure using flexible array member
-typedef struct log_buffer_struct {
-    struct log_buffer_struct *next;
-    uint32_t size;
-    char data[];  // flexible array member
-} log_buffer_t;
-
-typedef struct rtxn_wrapper_struct {
-    MDB_txn *rtxn;
-    union {
-        int ref_count;
-        struct rtxn_wrapper_struct *next_free; // Free list
-    };
-} rtxn_wrapper_t;
-
-#define TRANSACTION_FREE 0
-#define TRANSACTION_OPEN 1
-#define TRANSACTION_COMMITTING 2
-#define TRANSACTION_RACED 3
-#define TRANSACTION_SUCCEEDED 4
-#define TRANSACTION_FAILED 5
-
-// Transaction structure
-typedef struct ltxn_struct {
-    uint16_t nonce;
-    uint8_t state; // TRANSACTION_*
-    uint8_t has_writes;
-
-    rtxn_wrapper_t *rtxn_wrapper; // Pointer to LMDB 
-    // Buffer for storing commands (first/main buffer)
-    log_buffer_t *first_log_buffer;
-    log_buffer_t *last_log_buffer;  // Points to buffer being written to
-    char *log_end_ptr; // Next write pos within current_buffer
-    read_log_t *first_read_log; // Chronologically first read entry
-    read_log_t *last_read_log; // Chronologically last read entry
-    update_log_t *update_log_skiplist_ptrs[SKIPLIST_DEPTH]; // Skiplist for write entries, 4 pointers for 4 levels
-    
-    struct ltxn_struct *next; // Queue management for worker thread and free list
-    struct iterator_struct *first_iterator; // Linked list of iterators for this logical transaction
-    
-    // Callback for async completion
-    napi_ref callback_ref;
-    napi_env env;
-} ltxn_t;
-
-typedef struct iterator_struct {
-    struct iterator_struct *next; // Next iterator in the free list, or within the transaction
-    MDB_cursor *cursor;
-    MDB_val lmdb_key; // when mv_data is NULL, it means the cursor is at the end of the database
-    MDB_val lmdb_value;
-    update_log_t *current_update_log; // Current position within uncommitted records
-    iterate_log_t *iterate_log; // Log entry about this iterator
-    const char *end_key_data; // If set, the cursor will stop at this key
-    int ltxn_id; // Set to -1 when free
-    uint16_t end_key_size;
-    uint16_t nonce;
-} iterator_t;
-
-
+#define COMMIT_WORKER_SUFFIX "/commit_worker.sock"
 
 // Global state
-// LMDB environment
-static MDB_env *dbenv = NULL;
-static MDB_dbi dbi;
+
+// Error state
+char error_message[2048];
+char error_code[32];
+
+// LMDB environment, also used (after a fresh init) by commit_worker.c
+MDB_env *dbenv = NULL;
+MDB_dbi dbi;
 
 // Transactions
 static ltxn_t ltxns[MAX_LTXNS]; // This is quite large, but Linux will allocate pages lazily
 static ltxn_t *first_free_ltxn = NULL; // Start of linked-list of free transactions
 static int next_unused_ltxn = 0; // Index of next never-used transaction
-static ltxn_t *first_queued_ltxn = NULL; // Queue of transactions waiting for processing
-static ltxn_t *last_queued_ltxn = NULL;
+static ltxn_t *ltxn_commit_queue_head = NULL; // List of ltxns handed to the commit worker for processing
 
 // Log buffers
 static log_buffer_t *first_free_log_buffer = NULL; // Start of linked-list of free log buffers of DEFAULT_LOG_BUFFER_SIZE
@@ -157,137 +63,51 @@ static iterator_t *first_free_iterator = NULL; // Start of linked-list of free i
 static int next_unused_iterator = 0; // Index of next never-used iterator
 
 // Read transaction wrappers
-rtxn_wrapper_t rtxn_wrappers[MAX_RTXNS];
-rtxn_wrapper_t *first_free_rtxn_wrapper = NULL;
-int next_unused_rtxn_wrapper = 0;
-
-rtxn_wrapper_t *current_rtxn_wrapper = NULL;
-long long current_rtxn_expire_time = 0;
-
-// Worker
-int worker_running = 0; // Flag to indicate if a worker is currently processing transactions
-napi_async_work worker_work;
+static rtxn_wrapper_t rtxn_wrappers[MAX_RTXNS];
+static rtxn_wrapper_t *first_free_rtxn_wrapper = NULL;
+static int next_unused_rtxn_wrapper = 0;
+static rtxn_wrapper_t *current_rtxn_wrapper = NULL;
+static long long current_rtxn_expire_time = 0;
 
 // Random number generator
-uint64_t rng_state = 0;
+static uint64_t rng_state = 0;
 
-// DatabaseError class reference
-static napi_ref database_error_constructor_ref = NULL;
+// Worker communication
+static char *shared_memory;
+static char *shared_memory_unused_start;
+static char *shared_memory_unused_end;
+static int commit_worker_fd = -1;
+static int mmap_fd = -1;
+// This buffer is exactly short enough to work with the unix domain socket mess. It is shared with the commit worker.
+char db_dir[sizeof(((struct sockaddr_un*)0)->sun_path) - sizeof(COMMIT_WORKER_SUFFIX) + 1]; // 
+
+void (*set_signal_fd_callback)(int fd) = NULL;
 
 // Prototypes for internal functions
-static uint64_t checksum(const char *data, size_t len, uint64_t initial_checksum);
 static void *allocate_log_space(ltxn_t *ltxn, size_t needed_space);
-static void start_worker();
-static void on_worker_ready(napi_env env, napi_status status, void *data);
-static void process_write_commits(napi_env env, void *ltxns);
-static int validate_reads(MDB_txn *wtxn, ltxn_t *ltxn, MDB_cursor *validation_cursor);
 static void release_ltxn(ltxn_t *ltxn);
 static ltxn_t *allocate_ltxn();
-static ltxn_t *id_to_open_ltxn(napi_env env, int transaction_id);
+static ltxn_t *id_to_open_ltxn(int transaction_id);
 static int ltxn_to_id(ltxn_t *ltxn);
 static update_log_t *find_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data, int allow_before);
 static void delete_update_log(ltxn_t *ltxn, update_log_t *log);
-static int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse);
 static uint32_t get_random_number();
-int open_lmdb(napi_env env, const char *db_dir);
 
-// Logging and error macros
-#define LOG_INTERNAL_ERROR(message, ...) \
-    fprintf(stderr, "OLMDB: %s:%d " message "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+// Macro's
 
-#define ASSERT(condition) \
+#define SET_LMDB_ERROR(msg, rc, ...) \
     do { \
-        if (!(condition)) { \
-            LOG_INTERNAL_ERROR("Assertion failed: " #condition); \
-        } \
+        snprintf(error_message, sizeof(error_message), "LMDB " msg " failed (%s)", ##__VA_ARGS__, mdb_strerror(rc)); \
+        snprintf(error_code, sizeof(error_code), "LMDB%d", rc); \
     } while(0)
-
-#define ASSERT_OR_RETURN(condition, return_value) \
-    do { \
-        if (!(condition)) { \
-            LOG_INTERNAL_ERROR("Assertion failed: " #condition); \
-            return return_value; \
-        } \
-    } while(0)
-
-// Error throwing macros
-#define THROW_DB_ERROR(env, return_value, code, message, ...) \
-    do { \
-        char _error_msg[512]; \
-        snprintf(_error_msg, sizeof(_error_msg), message, ##__VA_ARGS__); \
-        throw_db_error(env, code, _error_msg); \
-        return (return_value); \
-    } while(0)
-
-#define THROW_TYPE_ERROR(env, return_value, code, message, ...) \
-    do { \
-        char _error_msg[512]; \
-        snprintf(_error_msg, sizeof(_error_msg), message, ##__VA_ARGS__); \
-        napi_throw_type_error(env, code, _error_msg); \
-        return (return_value); \
-    } while(0)
-
-#define THROW_LMDB_ERROR(env, return_value, message, error_code) \
-    do { \
-        char _code[16]; \
-        snprintf(_code, sizeof(_code), "LMDB%d", error_code); \
-        THROW_DB_ERROR(env, return_value, _code, message " (%s)", mdb_strerror(error_code)); \
-    } while(0)
-
 
 // Get the pointer to a struct from a pointer to one of its members
 #define CONTAINER_OF(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
-// Helper to create DatabaseError instances
-static napi_value throw_db_error(napi_env env, const char *code, const char *message) {
-    if (!database_error_constructor_ref) {
-        LOG_INTERNAL_ERROR("DatabaseError constructor not initialized");
-        napi_throw_error(env, code, message);
-        return NULL;
-    }
-    
-    napi_value constructor;
-    if (napi_get_reference_value(env, database_error_constructor_ref, &constructor) != napi_ok) {
-        LOG_INTERNAL_ERROR("Failed to get DatabaseError constructor reference");
-        napi_throw_error(env, code, message);
-        return NULL;
-    }
-    
-    napi_value message_val, code_val;
-    if (napi_create_string_utf8(env, message, NAPI_AUTO_LENGTH, &message_val) != napi_ok ||
-        napi_create_string_utf8(env, code, NAPI_AUTO_LENGTH, &code_val) != napi_ok) {
-        LOG_INTERNAL_ERROR("Failed to create string values for DatabaseError");
-        napi_throw_error(env, code, message);
-        return NULL;
-    }
-    
-    napi_value argv[] = { message_val, code_val };
-    napi_value error_instance;
-    if (napi_new_instance(env, constructor, 2, argv, &error_instance) != napi_ok) {
-        LOG_INTERNAL_ERROR("Failed to create DatabaseError instance");
-        napi_throw_error(env, code, message);
-        return NULL;
-    }
-    
-    napi_throw(env, error_instance);
-    return NULL;
-}
+// Inline functions
 
 static inline int max(int a, int b) { return a > b ? a : b; }
 static inline int min(int a, int b) { return a < b ? a : b; }
-
-static inline int get_ptr_tag(void *ptr) {
-    return (uintptr_t)ptr & 7; // Get the lower 3 bits
-}
-
-static inline void *strip_ptr_tag(void *ptr) {
-    return (void *)((uintptr_t)ptr & ~7); // Clear the lower 3 bits
-}
-
-static inline void *make_tag_ptr(void *ptr, int tag) {
-    ASSERT(((uintptr_t)ptr & 7) == 0); // Ensure ptr is aligned to 8 bytes
-    return (void *)((uintptr_t)ptr | (tag & 7)); // Set the lower 3 bits to tag
-}
 
 static inline int compare_keys(uint16_t key1_size, const char *key1, uint16_t key2_size, const char *key2) {
     int res = memcmp(key1, key2, min(key1_size, key2_size));
@@ -301,10 +121,6 @@ static int ltxn_to_id(ltxn_t *ltxn) {
     return (idx << 12) | (ltxn->nonce & 0xfff); // Use the lower 12 bits for nonce
 }
 
-// __attribute__((constructor))
-// static void olmdb_init(void) {
-// }
-
 static uint32_t get_random_number() {
     if (rng_state == 0) rng_state = (uint64_t)time(NULL);
     rng_state ^= rng_state << 13;
@@ -314,7 +130,8 @@ static uint32_t get_random_number() {
 }
 
 // A simple and very fast hash function for checksums
-static uint64_t checksum(const char *data, size_t len, uint64_t val) {
+uint64_t checksum(const char *data, size_t len, uint64_t val) {
+    if (!data) return 0;
     val ^= len;
     val *= CHECKSUM_PRIME;
     for (size_t i = 0; i < len; i++) {
@@ -324,7 +141,7 @@ static uint64_t checksum(const char *data, size_t len, uint64_t val) {
     return val;
 }
 
-long long get_time_ms() {
+static long long get_time_ms() {
 #ifdef _WIN32
     struct _timeb tb;
     _ftime_s(&tb);
@@ -336,56 +153,102 @@ long long get_time_ms() {
 #endif
 }
 
+log_buffer_t *allocate_shared_memory_blocks(uint32_t blocks) {
+    if (blocks == 1) {
+        // Special case for single block allocation
+        if (first_free_log_buffer) {
+            // Take a (recently) freed buffer from the free list
+            log_buffer_t *new_buf = first_free_log_buffer;
+            first_free_log_buffer = first_free_log_buffer->next;
+            new_buf->next = 0;
+            return new_buf;
+        } else {
+            // Allocate a new single block buffer at the end of the shared memory
+            shared_memory_unused_end -= DEFAULT_LOG_BUFFER_SIZE;
+            return (log_buffer_t *)shared_memory_unused_end;
+        }
+    }
+
+    // Scan all multi-page allocations from the start of the buffer until we find a free one
+    // that is large enough
+    log_buffer_t *current = (log_buffer_t *)shared_memory;
+    while((char *)current < shared_memory_unused_start) {
+        log_buffer_t *next = (log_buffer_t *)((char *)current + LOG_BUFFER_BLOCK_SIZE * current->blocks);
+        if (current->free) {
+            // Merge with subsequent buffers if they're also free
+            while ((char *)next < shared_memory_unused_start && next->free) {
+                current->blocks += next->blocks;
+                next = (log_buffer_t *)((char *)current + LOG_BUFFER_BLOCK_SIZE * current->blocks);
+            }
+            if (current->blocks >= blocks) {
+                // We can use this buffer
+                current->free = 0; // Mark as in use
+                if (blocks < current->blocks) {
+                    // If we have more blocks than needed, split the buffer
+                    log_buffer_t *next_buf = (log_buffer_t *)((char *)current + LOG_BUFFER_BLOCK_SIZE * blocks);
+                    next_buf->free = 1;
+                    next_buf->blocks = current->blocks - blocks;
+                    current->blocks = blocks;
+                }
+                return current;
+            }
+        }
+        current = next;
+    }
+    // No suitable free buffer found, allocate a new one at the start of the unused memory area
+    log_buffer_t *new_buf = (log_buffer_t *)shared_memory_unused_start;
+    shared_memory_unused_start += LOG_BUFFER_BLOCK_SIZE * blocks;
+    if (shared_memory_unused_start > shared_memory_unused_end) {
+        SET_ERROR("OUT_OF_MEMORY", "Not enough shared memory for %u blocks of size %d bytes", blocks, LOG_BUFFER_BLOCK_SIZE);
+        return NULL;
+    }
+    return new_buf;
+}
+
+void release_shared_memory_blocks(log_buffer_t *buf) {
+    if (buf->blocks == 1) {
+        // Single block buffer, just return it to the free list
+        buf->next = first_free_log_buffer;
+        first_free_log_buffer = buf;
+        return;
+    }
+
+    // Multi-block buffer, just mark it as free
+    buf->next = NULL;
+    buf->free = 1;
+}
+
 // Ensure buffer has enough space, growing if necessary
 static void *allocate_log_space(ltxn_t *ltxn, size_t needed_space) {
     // Align buffer position to 8 bytes
-    ltxn->log_end_ptr = (void *)(((uintptr_t)ltxn->log_end_ptr + 7) & ~7);
-    
-    if (!ltxn->last_log_buffer || ltxn->log_end_ptr + needed_space > ltxn->last_log_buffer->data + ltxn->last_log_buffer->size) {
-        size_t new_size = max(DEFAULT_LOG_BUFFER_SIZE, needed_space + 7 /* for alignment */);
+    ltxn->log_write_ptr = (char *)(((uintptr_t)ltxn->log_write_ptr + 7) & ~7);
+    if (!ltxn->first_log_buffer || ltxn->log_write_ptr + needed_space > ltxn->log_end_ptr) {
+        uint32_t blocks = (needed_space + 7 /* for alignment */ + sizeof(log_buffer_t) + DEFAULT_LOG_BUFFER_SIZE - 1) / DEFAULT_LOG_BUFFER_SIZE;
         
-        log_buffer_t *new_buf;
-        if (new_size == DEFAULT_LOG_BUFFER_SIZE && first_free_log_buffer) {
-            new_buf = first_free_log_buffer;
-            first_free_log_buffer = first_free_log_buffer->next;
-        } else {
-            // Allocate new buffer with data area included
-            size_t alloc_size = sizeof(log_buffer_t) + new_size;
-            new_buf = malloc(alloc_size);
-            if (!new_buf) {
-                LOG_INTERNAL_ERROR("Failed to allocate transaction buffer of size %zu", alloc_size);
-                return NULL;
-            }
-            new_buf->size = new_size;
-        }
+        log_buffer_t *new_buf = allocate_shared_memory_blocks(blocks);
+
+        new_buf->next = ltxn->first_log_buffer;
+        ltxn->first_log_buffer = new_buf;
         
-        new_buf->next = NULL;
-        if (ltxn->last_log_buffer) {
-            ltxn->last_log_buffer->next = new_buf;
-        } else {
-            ltxn->first_log_buffer = new_buf;
-        }
-        ltxn->last_log_buffer = new_buf;
         // Align buffer position to 8 bytes
-        ltxn->log_end_ptr = (void *)(((uintptr_t)new_buf->data + 7) & ~7);
+        ltxn->log_write_ptr = (char *)(((uintptr_t)new_buf->data + 7) & ~7);
+        ltxn->log_end_ptr = (char *)new_buf + blocks * LOG_BUFFER_BLOCK_SIZE;
     }
     
-    void *result = ltxn->log_end_ptr;
-    ltxn->log_end_ptr += needed_space;
+    void *result = ltxn->log_write_ptr;
+    ltxn->log_write_ptr += needed_space;
     return result;
 }
-
-static read_log_t *create_read_log(ltxn_t *ltxn, size_t size, uint8_t tag) {    
+static read_log_t *create_read_log(ltxn_t *ltxn, size_t size, int32_t row_count) {    
     read_log_t *read_log = allocate_log_space(ltxn, size);
     ASSERT_OR_RETURN(read_log != NULL, NULL);
-    ASSERT(get_ptr_tag(read_log) == 0);
     
     // Initialize the read log entry
-    read_log->tagged_next_ptr = make_tag_ptr(NULL, tag);
+    read_log->next_ptr = NULL;
+    read_log->row_count = row_count;
     
     if (ltxn->last_read_log) {
-        // Keep tag on previous log's next pointer
-        ltxn->last_read_log->tagged_next_ptr = make_tag_ptr(read_log, get_ptr_tag(ltxn->last_read_log->tagged_next_ptr));
+        ltxn->last_read_log->next_ptr = read_log;
     } else {
         ltxn->first_read_log = read_log;
     }
@@ -393,21 +256,13 @@ static read_log_t *create_read_log(ltxn_t *ltxn, size_t size, uint8_t tag) {
     return read_log;
 }
 
-// Reset transaction state and put it back into the free list
-static void release_ltxn(ltxn_t *ltxn) {        
+static void release_ltxn_logs(ltxn_t *ltxn) {
     // Free all except the first log buffer (which is always DEFAULT_LOG_BUFFER_SIZE bytes)
     log_buffer_t *lb = ltxn->first_log_buffer;
     ltxn->first_log_buffer = NULL;
     while(lb) {
         log_buffer_t *next = lb->next;
-        if (lb->size == DEFAULT_LOG_BUFFER_SIZE) {
-            // Default size, put in free list
-            lb->next = first_free_log_buffer;
-            first_free_log_buffer = lb;
-        } else {
-            // Custom size, free it
-            free(lb);
-        }
+        release_shared_memory_blocks(lb);
         lb = next;
     }
     
@@ -418,28 +273,26 @@ static void release_ltxn(ltxn_t *ltxn) {
         ltxn->update_log_skiplist_ptrs[i] = NULL;
     }
     
-    ltxn->has_writes = 0;
-    ltxn->next = NULL;
-    
-    // Clean up callback reference
-    if (ltxn->callback_ref) {
-        napi_status status = napi_delete_reference(ltxn->env, ltxn->callback_ref);
-        if (status != napi_ok) {
-            LOG_INTERNAL_ERROR("Failed to delete callback reference for transaction %d", ltxn_to_id(ltxn));
-        }
-        ltxn->callback_ref = NULL;
-    }
-    ltxn->env = NULL;
-    
-    // Move iterators to free list
+}
+
+static void release_ltxn_iterators(ltxn_t *ltxn) {
     iterator_t *it = ltxn->first_iterator;
     while(it) {
         it->ltxn_id = -1;
         iterator_t *next = it->next;
-        it->next = NULL;
+        it->next = first_free_iterator;
+        first_free_iterator = it;
         it = next;
     }
     ltxn->first_iterator = NULL;
+}
+
+// Reset transaction state and put it back into the free list
+static void release_ltxn(ltxn_t *ltxn) {        
+    release_ltxn_logs(ltxn);
+    release_ltxn_iterators(ltxn);
+    
+    ltxn->has_writes = 0;
     
     // Return transaction to free list
     ltxn->state = TRANSACTION_FREE;
@@ -447,24 +300,26 @@ static void release_ltxn(ltxn_t *ltxn) {
     first_free_ltxn = ltxn;
 }
 
-static ltxn_t *id_to_open_ltxn(napi_env env, int ltxn_id) {
+static ltxn_t *id_to_open_ltxn(int ltxn_id) {
     int idx = ltxn_id >> 12;
     uint16_t nonce = ltxn_id & 0xfff;
     
     if (idx >= MAX_LTXNS) {
-        THROW_DB_ERROR(env, NULL, "INVALID_TRANSACTION", "Transaction index %d exceeds maximum %d", idx, MAX_LTXNS - 1);
+        SET_ERROR("INVALID_TRANSACTION", "Transaction index %d exceeds maximum %d", idx, MAX_LTXNS - 1);
+        return NULL;
     }
     
     ltxn_t *ltxn = &ltxns[idx];
     if (ltxn->state != TRANSACTION_OPEN || ltxn->nonce != nonce) {
-        THROW_DB_ERROR(env, NULL, "INVALID_TRANSACTION", "Transaction ID %d not found or already closed (index=%d, nonce=%u, state=%d, expected_nonce=%u)", 
-                      ltxn_id, idx, nonce, ltxn->state, ltxn->nonce);
+        SET_ERROR("INVALID_TRANSACTION", "Transaction ID %d not found or already closed (index=%d, nonce=%u, state=%d, expected_nonce=%u)", 
+                  ltxn_id, idx, nonce, ltxn->state, ltxn->nonce);
+        return NULL;
     }
     
     return ltxn;
 }
 
-void assign_rtxn_wrapper(ltxn_t *ltxn) {
+static void assign_rtxn_wrapper(ltxn_t *ltxn) {
     ASSERT(ltxn->rtxn_wrapper == NULL);
     long long time = get_time_ms();
     if (time < current_rtxn_expire_time) {
@@ -472,7 +327,6 @@ void assign_rtxn_wrapper(ltxn_t *ltxn) {
         ltxn->rtxn_wrapper = current_rtxn_wrapper;
         return;
     }
-
     rtxn_wrapper_t *rtxn_wrapper = first_free_rtxn_wrapper;
     if (rtxn_wrapper) {
         first_free_rtxn_wrapper = rtxn_wrapper->next_free;
@@ -491,8 +345,7 @@ void assign_rtxn_wrapper(ltxn_t *ltxn) {
     current_rtxn_expire_time = time+100; // Share this read transaction with all logical transactions started within the next 100 ms
     ltxn->rtxn_wrapper = rtxn_wrapper;
 }
-
-void release_rtxn_wrapper(ltxn_t *ltxn) {
+static void release_rtxn_wrapper(ltxn_t *ltxn) {
     rtxn_wrapper_t *rtxn_wrapper = ltxn->rtxn_wrapper;
     ASSERT_OR_RETURN(rtxn_wrapper != NULL,);
     if (--rtxn_wrapper->ref_count <= 0) {
@@ -508,8 +361,6 @@ void release_rtxn_wrapper(ltxn_t *ltxn) {
     }
     ltxn->rtxn_wrapper = NULL;
 }
-
-
 // Find an available transaction slot
 static ltxn_t *allocate_ltxn() {
     ltxn_t *ltxn;
@@ -519,36 +370,36 @@ static ltxn_t *allocate_ltxn() {
     } else if (next_unused_ltxn < MAX_LTXNS) {
         ltxn = &ltxns[next_unused_ltxn++];
     } else {
+        SET_ERROR("TXN_LIMIT", "Transaction limit reached - no available transaction slots (max: %d)", MAX_LTXNS);
         return NULL;
     }
     ltxn->nonce = get_random_number() & 0xfff; // Generate a random nonce
     ltxn->state = TRANSACTION_OPEN;
     return ltxn;
 }
-
-static iterator_t *id_to_open_iterator(napi_env env, int iterator_id) {
+static iterator_t *id_to_open_iterator(int iterator_id) {
     int idx = iterator_id >> 12;
     uint16_t nonce = iterator_id & 0xfff;
     
     if (idx >= MAX_ITERATORS) {
-        THROW_DB_ERROR(env, NULL, "INVALID_ITERATOR", "Iterator index %d exceeds maximum %d", idx, MAX_ITERATORS - 1);
+        SET_ERROR("INVALID_ITERATOR", "Iterator index %d exceeds maximum %d", idx, MAX_ITERATORS - 1);
+        return NULL;
     }
     
     iterator_t *iterator = &iterators[idx];
     if (iterator->ltxn_id < 0 || iterator->nonce != nonce) {
-        THROW_DB_ERROR(env, NULL, "INVALID_ITERATOR", "Iterator ID %d not found or already closed (index=%d, nonce=%u, txn_id=%d, expected_nonce=%u)", 
-                      iterator_id, idx, nonce, iterator->ltxn_id, iterator->nonce);
+        SET_ERROR("INVALID_ITERATOR", "Iterator ID %d not found or already closed (index=%d, nonce=%u, txn_id=%d, expected_nonce=%u)", 
+                  iterator_id, idx, nonce, iterator->ltxn_id, iterator->nonce);
+        return NULL;
     }
     
     return iterator;
 }
-
 static int iterator_to_id(iterator_t *iterator) {
     int idx = iterator - iterators;
     ASSERT(idx >= 0 && idx < MAX_ITERATORS);
     return (idx << 12) | (iterator->nonce & 0xfff);
 }
-
 static iterator_t *allocate_iterator(ltxn_t *ltxn) {
     iterator_t *iterator;
     if (first_free_iterator) {
@@ -561,13 +412,13 @@ static iterator_t *allocate_iterator(ltxn_t *ltxn) {
         ASSERT_OR_RETURN(mdb_cursor_open(ltxn->rtxn_wrapper->rtxn, dbi, &iterator->cursor) == MDB_SUCCESS, NULL);
     } else {
         LOG_INTERNAL_ERROR("No free iterator slots available (max: %d)", MAX_ITERATORS);
+        SET_ERROR("INVALID_ITERATOR", "No free iterator slots available (max: %d)", MAX_ITERATORS);
         return NULL;
     }
     iterator->ltxn_id = ltxn_to_id(ltxn);
     iterator->nonce = get_random_number() & 0xfff; // Generate a random nonce
     return iterator;
 }
-
 // if_not_found: 0=returning nothing 1=return next 2=return previous
 static update_log_t *find_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data, int if_not_found) {
     int level = SKIPLIST_DEPTH - 1;
@@ -599,7 +450,6 @@ static update_log_t *find_update_log(ltxn_t *ltxn, uint16_t key_size, const char
     }
     return NULL;
 }
-
 static update_log_t *find_last_update_log(ltxn_t *ltxn) {
     int level = SKIPLIST_DEPTH - 1;
     update_log_t **next_ptrs = ltxn->update_log_skiplist_ptrs;
@@ -619,9 +469,11 @@ static update_log_t *find_last_update_log(ltxn_t *ltxn) {
     // This cast happens to be right, as the next_ptrs are at the start of the record_t
     return (update_log_t *)next_ptrs;
 }
-
 static void add_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data, uint32_t value_size, const char *value_data) {
     int size = sizeof(update_log_t) + (int)key_size + value_size;
+    // Align to 4 bytes for update_log_t as per the new alignment requirement
+    size = (size + 3) & ~3;
+    
     update_log_t *new_log = allocate_log_space(ltxn, size);
     if (!new_log) return;
     
@@ -675,7 +527,6 @@ static void add_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data
         delete_update_log(ltxn, new_log->next_ptrs[0]);
     }
 }
-
 static void delete_update_log(ltxn_t *ltxn, update_log_t *log) {
     // Find all predecessors that point to this log entry across all levels
     int level = SKIPLIST_DEPTH - 1;
@@ -709,7 +560,7 @@ static void delete_update_log(ltxn_t *ltxn, update_log_t *log) {
     }
 }
 
-static int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse) {
+int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse) {
     MDB_val in_key;
     memcpy(&in_key, key, sizeof(MDB_val));
     
@@ -736,429 +587,315 @@ static int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int re
     return rc;
 }
 
-// Start worker for async processing
-static void start_worker() {
-    if (worker_running) return; // Already running
-    ltxn_t *ltxns = first_queued_ltxn;
-    if (!ltxns) return; // Nothing to process
-    first_queued_ltxn = last_queued_ltxn = NULL;
-    
-    worker_running = 1;
-    napi_value resource_name;
-    ASSERT_OR_RETURN(napi_create_string_utf8(ltxns->env, "commit_work", NAPI_AUTO_LENGTH, &resource_name) == napi_ok,);
-    
-    napi_status status = napi_create_async_work(
-        ltxns->env, NULL, resource_name,
-        process_write_commits, on_worker_ready,
-        ltxns, &worker_work
-    );
-    
-    if (status != napi_ok) {
-        LOG_INTERNAL_ERROR("Failed to create async work");
-        worker_running = 0;
-        return;
-    }
-    
-    status = napi_queue_async_work(ltxns->env, worker_work);
-    if (status != napi_ok) {
-        LOG_INTERNAL_ERROR("Failed to queue async work");
-        napi_delete_async_work(ltxns->env, worker_work);
-        worker_running = 0;
-    }
+int sendfd(int sockfd, int fd)
+{
+    /* Allocate a char array of suitable size to hold the ancillary data.
+       However, since this buffer is in reality a 'struct cmsghdr', use a
+       union to ensure that it is aligned as required for that structure.
+       Alternatively, we could allocate the buffer using malloc(), which
+       returns a buffer that satisfies the strictest alignment requirements
+       of any type. However, if we employ that approach, we must ensure
+       that we free() the buffer on all return paths from this function. */
+    union {
+        char   buf[CMSG_SPACE(sizeof(int))];
+                        /* Space large enough to hold an 'int' */
+        struct cmsghdr align;
+    } controlMsg;
+
+    /* The 'msg_name' field can be used to specify the address of the
+       destination socket when sending a datagram. However, we do not need
+       to use this field because we presume that 'sockfd' is a connected
+       socket. */
+
+    struct msghdr msgh;
+    msgh.msg_name = NULL;
+    msgh.msg_namelen = 0;
+
+    /* On Linux, we must transmit at least one byte of real data in order to
+       send ancillary data. We transmit an arbitrary integer whose value is
+       ignored by recvfd(). */
+
+    struct iovec iov;
+    int data;
+
+    data = 12345;
+    iov.iov_base = &data;
+    iov.iov_len = sizeof(int);
+    msgh.msg_iov = &iov;
+    msgh.msg_iovlen = 1;
+
+    /* Set 'msghdr' fields that describe ancillary data. */
+
+    msgh.msg_control = controlMsg.buf;
+    msgh.msg_controllen = sizeof(controlMsg.buf);
+
+    /* Set up ancillary data describing file descriptor to send. */
+
+    struct cmsghdr *cmsgp;
+    cmsgp = CMSG_FIRSTHDR(&msgh);
+    cmsgp->cmsg_level = SOL_SOCKET;
+    cmsgp->cmsg_type = SCM_RIGHTS;
+    cmsgp->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsgp), &fd, sizeof(int));
+
+    /* Send real plus ancillary data. */
+
+    if (sendmsg(sockfd, &msgh, 0) == -1)
+        return -1;
+
+    return 0;
 }
 
-// Worker completion function (main thread callback)
-static void on_worker_ready(napi_env env, napi_status status, void *data) {
-    (void)status; // Unused parameter
-    ltxn_t *ltxns = (ltxn_t *)data;
-    
-    // Call callbacks for each completed transaction
-    ltxn_t *ltxn = ltxns;
-    while (ltxn) {
-        ltxn_t *next = ltxn->next;
-        
-        if (ltxn->callback_ref) {
-            napi_value callback;
-            if (napi_get_reference_value(env, ltxn->callback_ref, &callback) == napi_ok) {
-                napi_value global;
-                if (napi_get_global(env, &global) != napi_ok) {
-                    LOG_INTERNAL_ERROR("Failed to get global object for callback");
-                } else {
-                    napi_value ltxn_id;
-                    napi_value status;
-                    
-                    if (napi_create_int32(env, ltxn_to_id(ltxn), &ltxn_id) != napi_ok ||
-                        napi_create_int32(env, ltxn->state, &status) != napi_ok) {
-                        LOG_INTERNAL_ERROR("Failed to create callback arguments for transaction %d", ltxn_to_id(ltxn));
-                    } else {
-                        napi_value argv[] = { ltxn_id, status };
-                        napi_value callback_result;
-                        if (napi_call_function(env, global, callback, 2, argv, &callback_result) != napi_ok) {
-                            LOG_INTERNAL_ERROR("Failed to call callback for transaction %d", ltxn_to_id(ltxn));
-                        }
-                    }
-                }
-            } else {
-                LOG_INTERNAL_ERROR("Could not obtain callback value for transaction %d", ltxn_to_id(ltxn));
-            }
+static int connect_to_commit_worker() {
+    struct sockaddr_un addr;
+    for(int retry_count = 0; retry_count < 10; retry_count++) {
+        int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        if (fd == -1) {
+            SET_ERROR("NO_SERVER", "Failed to create socket: %s", strerror(errno));
+            return -1;
         }
         
-        release_ltxn(ltxn);
-        ltxn = next;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s" COMMIT_WORKER_SUFFIX, db_dir);
+
+        // First try to bind, see if we can become the server
+        if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            start_commit_worker(fd, db_dir);
+            usleep(10000); // 10ms to allow the server to start (otherwise the retry will come to the rescue)
+            close(fd);
+            continue; // Now try to connect to the server
+        } else if (errno != EADDRINUSE) {
+            LOG_INTERNAL_ERROR("Failed to bind to socket '%s': %s", addr.sun_path, strerror(errno));
+        }
+        
+        // Try to become client instead
+        if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+            LOG_INTERNAL_ERROR("Failed to connect to server socket '%s': %s", addr.sun_path, strerror(errno));
+            goto delayed_retry_connect;
+        }
+
+        if (sendfd(fd, mmap_fd)) {
+            LOG_INTERNAL_ERROR("Failed to send shared memory file descriptor to commit worker: %s", strerror(errno));
+            goto delayed_retry_connect;
+        }
+        init_command_t init_command = {
+            .type = 'i',
+            .mmap_ptr = (uintptr_t)shared_memory,
+            .mmap_size = SHARED_MEMORY_SIZE,
+        };
+        if (send(fd, &init_command, sizeof(init_command), 0) < 0) {
+            LOG_INTERNAL_ERROR("Failed to send init command to commit worker: %s", strerror(errno));
+            goto delayed_retry_connect;
+        }
+
+        return fd;
+    delayed_retry_connect:
+        close(fd);
+        usleep(10000 + (get_random_number()%40000)); // 10ms ~ 50ms before trying again
     }
-    
-    // Clean up async work
-    if (napi_delete_async_work(env, worker_work) != napi_ok) {
-        LOG_INTERNAL_ERROR("Failed to delete async work");
-    }
-    worker_running = 0;
-    
-    // Start new worker if there are queued transactions
-    start_worker();
+
+    SET_ERROR("NO_SERVER", "Failed to connect to commit worker after multiple attempts");
+    return -1;
 }
 
-// Process all write commands in a single LMDB transaction
-static void process_write_commits(napi_env env, void *data) {
-    (void)env; // Unused parameter
-    ltxn_t *ltxns = (ltxn_t *)data;
-    
-    MDB_txn *wtxn = NULL;
-    int rc = mdb_txn_begin(dbenv, NULL, 0, &wtxn);
-    if (rc != MDB_SUCCESS) {
-        LOG_INTERNAL_ERROR("Failed to begin write transaction: %s", mdb_strerror(rc));
-        // Mark all transactions as failed
-        for(ltxn_t *ltxn = ltxns; ltxn; ltxn = ltxn->next) {
-            ltxn->state = TRANSACTION_FAILED;
-        }
-        return;
-    }
-    
-    // Cursors within read/write transactions will be closed automatically
-    // when the transaction ends
-    int failed = 0;
-    MDB_cursor *validation_cursor;
-    rc = mdb_cursor_open(wtxn, dbi, &validation_cursor);
-    if (rc != MDB_SUCCESS) {
-        LOG_INTERNAL_ERROR("Failed to open cursor for validation: %s", mdb_strerror(rc));
-        failed = 1;
-    }
-    
-    for(ltxn_t *ltxn = ltxns; ltxn && !failed; ltxn = ltxn->next) {
-        // Validate all reads for this transaction
-        ltxn->state = validate_reads(wtxn, ltxn, validation_cursor);
-        
-        if (ltxn->state == TRANSACTION_RACED) continue; // Skip processing if transaction has been raced
-        if (ltxn->state == TRANSACTION_FAILED) break; // Stop processing further transactions
-        
-        // Process all write entries in skiplist order
-        update_log_t *update = ltxn->update_log_skiplist_ptrs[0];
-        
-        while (update && !failed) {
-            MDB_val key;
-            key.mv_data = update->data;
-            key.mv_size = update->key_size;
-            if (update->value_size == 0) {
-                // Delete operation
-                rc = mdb_del(wtxn, dbi, &key, NULL);
-                if (rc != MDB_SUCCESS && rc != MDB_NOTFOUND) {
-                    LOG_INTERNAL_ERROR("Failed to delete key %.*s: %s", (int)update->key_size, update->data, mdb_strerror(rc));
-                    failed = 1;
-                }
-            } else {
-                // Put operation
-                MDB_val value;
-                value.mv_data = update->data + update->key_size;
-                value.mv_size = update->value_size;
-                
-                rc = mdb_put(wtxn, dbi, &key, &value, 0);
-                if (rc != MDB_SUCCESS) {
-                    LOG_INTERNAL_ERROR("Failed to put key %.*s: %s", (int)update->key_size, update->data, mdb_strerror(rc));
-                    failed = 1;
-                }
-            }
-            update = update->next_ptrs[0];
+void reconnect_commit_worker() {
+    // If there was a commit queue, we will mark all transactions as raced, so
+    // JavaScript will rerun them. In case one of these transactions was causing the
+    // problem, hopefully this will resolve it. (And otherwise there will be 
+    // a retry limit, so we'll eventually give up.)
+    for (ltxn_t *current = ltxn_commit_queue_head; current; current = current->next) {
+        if (current->state == TRANSACTION_COMMITTING) {
+            current->state = TRANSACTION_RACED;
         }
     }
-    
-    if (failed) {
-        // If any transaction/update failed, we need to abort all
-        mdb_txn_abort(wtxn);
-        // Mark remaining transactions as failed
-        for(ltxn_t *ltxn = ltxns; ltxn; ltxn = ltxn->next) {
-            if (ltxn->state == TRANSACTION_COMMITTING) {
-                ltxn->state = TRANSACTION_FAILED;
-            }
-        }
-    } else {
-        rc = mdb_txn_commit(wtxn);
-        if (rc != MDB_SUCCESS) {
-            LOG_INTERNAL_ERROR("Failed to commit write transaction: %s", mdb_strerror(rc));
-            for(ltxn_t *ltxn = ltxns; ltxn; ltxn = ltxn->next) {
-                if (ltxn->state == TRANSACTION_COMMITTING) {
-                    ltxn->state = TRANSACTION_FAILED;
-                }
-            }
-        }
-    }
+
+    close(commit_worker_fd);
+    commit_worker_fd = -1;
+    commit_worker_fd = connect_to_commit_worker();
 }
 
-// Validate that all read values haven't changed: returns TRANSACTION_*
-static int validate_reads(MDB_txn *wtxn, ltxn_t *ltxn, MDB_cursor *validation_cursor) {
-    read_log_t *current = ltxn->first_read_log;
-    MDB_val key, value;
-    
-    while (current) {
-        if (current->tag & 1) { // Iterator
-            int reverse = current->tag & 2;
-            
-            key.mv_size = current->iterate.key_size;
-            key.mv_data = current->iterate.key_data;
-            int rc = place_cursor(validation_cursor, &key, &value, reverse);
-            if (rc != MDB_SUCCESS) {
-                LOG_INTERNAL_ERROR("Failed to place cursor for iterator validation: %s", mdb_strerror(rc));
-                return TRANSACTION_FAILED;
-            }
-            
-            uint64_t cs = CHECKSUM_INITIAL;
-            cs = checksum(key.mv_data, key.mv_size, cs);
-            cs = checksum(value.mv_data, value.mv_size, cs);
-            
-            for(int row_count = current->iterate.row_count; row_count > 0; row_count--) {
-                // Read the next item in the LMDB cursor
-                int rc = mdb_cursor_get(validation_cursor, &key, &value, reverse ? MDB_PREV : MDB_NEXT);
-                if (rc == MDB_NOTFOUND) {
-                    key.mv_data = value.mv_data = NULL;
-                    key.mv_size = value.mv_size = 0;
-                } else if (rc != MDB_SUCCESS) {
-                    LOG_INTERNAL_ERROR("Failed to read next item in cursor validation: %s", mdb_strerror(rc));
-                    return TRANSACTION_FAILED;
-                }
-                cs = checksum(key.mv_data, key.mv_size, cs);
-                cs = checksum(value.mv_data, value.mv_size, cs);
-            }
-            
-            if (cs != current->iterate.checksum) {
-                return TRANSACTION_RACED;
-            }
-        } else { // Regular read
-            key.mv_data = current->get.key_data;
-            key.mv_size = current->get.key_size;
-            int rc = mdb_get(wtxn, dbi, &key, &value);
-            uint64_t cs = CHECKSUM_INITIAL;
-            if (rc == MDB_NOTFOUND) {
-                cs = 0;
-            } else if (rc == MDB_SUCCESS) {
-                cs = checksum((char *)value.mv_data, value.mv_size, cs);
-            } else {
-                LOG_INTERNAL_ERROR("Failed to read key %.*s during validation: %s", (int)key.mv_size, (char *)key.mv_data, mdb_strerror(rc));
-                return TRANSACTION_FAILED;
-            }
-            if (cs != current->get.checksum) {
-                return TRANSACTION_RACED;
-            }
-        }
-        current = strip_ptr_tag(current->tagged_next_ptr);
-    }
-    
-    return TRANSACTION_SUCCEEDED; // All reads validated successfully
-}
-
-__attribute__((destructor)) 
-static void cleanup_olmdb() {
-    // Cleanup on exit - worker threads will be cleaned up automatically by Node.js
-}
-
-// Returns 1 on success, 0 on failure (error already thrown)
-int open_lmdb(napi_env env, const char *db_dir) {
+int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
     if (dbenv) {
-        THROW_DB_ERROR(env, 0, "ALREADY_OPEN", "Database is already open");
+        SET_ERROR("ALREADY_OPEN", "Database is already init");
+        return -1;
     }
+
+    set_signal_fd_callback = set_signal_fd;
     
-    if (!db_dir || !db_dir[0]) {
+    if (!_db_dir || !_db_dir[0]) {
         // Read $OLMDB_DIR environment variable or use default './.olmdb'
-        db_dir = getenv("OLMDB_DIR");
-        if (!db_dir || !db_dir[0]) {
-            db_dir = "./.olmdb"; // Default directory
+        _db_dir = getenv("OLMDB_DIR");
+        if (!_db_dir || !_db_dir[0]) {
+            _db_dir = "./.olmdb"; // Default directory
         }
     }
+
+    if (strlen(_db_dir) >= sizeof(db_dir)) {
+        SET_ERROR("DB_DIR_TOO_LONG", "Database directory path exceeds maximum length of %zu characters", sizeof(db_dir) - 1);
+        return -1;
+    }
+
+    strncpy(db_dir, _db_dir, sizeof(db_dir) - 1);
+    db_dir[sizeof(db_dir) - 1] = '\0'; // Ensure null termination
     
     // Create database directory if it doesn't exist
     if (mkdir(db_dir, 0755) != 0 && errno != EEXIST) {
-        THROW_DB_ERROR(env, 0, "CREATE_DIR_FAILED", "Failed to create/open database directory '%s': %s", 
-                      db_dir, strerror(errno));
+        SET_ERROR("CREATE_DIR_FAILED", "Failed to create/open database directory '%.512s': %s", db_dir, strerror(errno));
+        return -1;
     }
-    
+
+    if (init_lmdb() < 0) return -1; // Error already set
+
+    mmap_fd = memfd_create("client_shared_mem", 0);
+    if (mmap_fd < 0) {
+        SET_ERROR("OOM", "Failed to create shared memory: %s", strerror(errno));
+        return -1;
+    }
+    if (ftruncate(mmap_fd, SHARED_MEMORY_SIZE) == -1) {
+        SET_ERROR("OOM", "Failed to set size of shared memory: %s", strerror(errno));
+        close(mmap_fd);
+        return -1;
+    }
+    shared_memory = mmap(NULL, SHARED_MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, mmap_fd, 0);
+    if (shared_memory == MAP_FAILED) {
+        SET_ERROR("OOM", "Failed to map shared memory: %s", strerror(errno));
+        close(mmap_fd);
+        shared_memory = NULL;
+        return -1;
+    }
+
+    shared_memory_unused_start = shared_memory;
+    shared_memory_unused_end = shared_memory + SHARED_MEMORY_SIZE;
+
+    commit_worker_fd = connect_to_commit_worker();
+    if (commit_worker_fd < 0) return -1; // Error already set
+
+    if (set_signal_fd_callback) {
+        set_signal_fd_callback(commit_worker_fd);
+    }
+
+    return commit_worker_fd;
+}
+
+int init_lmdb() {
     // Initialize LMDB environment
     int rc = mdb_env_create(&dbenv);
-    if (rc != MDB_SUCCESS) goto open_fail_base;
+    if (rc != MDB_SUCCESS) {
+        SET_LMDB_ERROR("env create", rc);
+        return -1;
+    }
     
-    rc = mdb_env_set_mapsize(dbenv, 1024UL * 1024UL * 1024UL * 1024UL * 16UL); // 16TB
-    if (rc != MDB_SUCCESS) goto open_fail_env;
+    rc = mdb_env_set_mapsize(dbenv, 16ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL); // 16TB
+    if (rc != MDB_SUCCESS) {
+        mdb_env_close(dbenv);
+        dbenv = NULL;
+        SET_LMDB_ERROR("set map size", rc);
+        return -1;
+    }
     
     rc = mdb_env_set_maxreaders(dbenv, MAX_LTXNS);
-    if (rc != MDB_SUCCESS) goto open_fail_env;
+    if (rc != MDB_SUCCESS) {
+        mdb_env_close(dbenv);
+        dbenv = NULL;
+        SET_LMDB_ERROR("set max readers", rc);
+        return -1;
+    }
     
     rc = mdb_env_open(dbenv, db_dir, MDB_NOTLS, 0664);
-    if (rc != MDB_SUCCESS) goto open_fail_env;
+    if (rc != MDB_SUCCESS) {
+        mdb_env_close(dbenv);
+        dbenv = NULL;
+        SET_LMDB_ERROR("env init", rc);
+        return -1;
+    }
     
     // Open the database (within a transaction)
     MDB_txn *wtxn;
     rc = mdb_txn_begin(dbenv, NULL, 0, &wtxn);
-    if (rc != MDB_SUCCESS) goto open_fail_env;
+    if (rc != MDB_SUCCESS) {
+        mdb_env_close(dbenv);
+        dbenv = NULL;
+        SET_LMDB_ERROR("dbi init txn begin", rc);
+        return -1;
+    }
     
     rc = mdb_dbi_open(wtxn, NULL, 0, &dbi);
-    if (rc != MDB_SUCCESS) goto open_fail_txn;
+    if (rc != MDB_SUCCESS) {
+        mdb_txn_abort(wtxn);
+        mdb_env_close(dbenv);
+        dbenv = NULL;
+        SET_LMDB_ERROR("dbi init", rc);
+        return -1;
+    }
     
     rc = mdb_txn_commit(wtxn);
-    if (rc != MDB_SUCCESS) goto open_fail_env;
+    if (rc != MDB_SUCCESS) {
+        mdb_env_close(dbenv);
+        dbenv = NULL;
+        SET_LMDB_ERROR("dbi init txn commit", rc);
+        return -1;
+    }
     
-    return 1;
-    
-open_fail_txn:
-    mdb_txn_abort(wtxn);
-open_fail_env:
-    mdb_env_close(dbenv);
-    dbenv = NULL;
-open_fail_base:
-    THROW_LMDB_ERROR(env, 0, "Open failed", rc);
+    return 0;
 }
 
-napi_value js_start_transaction(napi_env env, napi_callback_info info) {
-    // Auto-open the database if needed
-    if (!dbenv && !open_lmdb(env, NULL)) return NULL; // Initialization failed, error already thrown
-    
-    ltxn_t *ltxn = allocate_ltxn();
-    if (!ltxn) {
-        THROW_DB_ERROR(env, NULL, "TXN_LIMIT", "Transaction limit reached - no available transaction slots (max: %d)", MAX_LTXNS);
+int start_transaction() {
+    if (!dbenv) {
+        SET_ERROR("NOT_OPEN", "Database is not init");
+        return -1;
     }
 
+    ltxn_t *ltxn = allocate_ltxn();
+    if (!ltxn) return -1; // Error already set
+    
     assign_rtxn_wrapper(ltxn);
     
     // Combine index and nonce into transaction ID
-    napi_value result;
-    ASSERT_OR_RETURN(napi_create_int32(env, ltxn_to_id(ltxn), &result) == napi_ok, NULL);
-    return result;
+    return ltxn_to_id(ltxn);
 }
 
-napi_value js_commit_transaction(napi_env env, napi_callback_info info) {
-    napi_status status;
-    size_t argc = 2;
-    napi_value argv[2];
-    
-    status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (status != napi_ok || argc < 1) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected at least one argument (transaction ID), got %zu", argc);
-    }
-    
-    int32_t ltxn_id;
-    status = napi_get_value_int32(env, argv[0], &ltxn_id);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID as integer, got invalid type");
-    }
-    
-    ltxn_t *ltxn = id_to_open_ltxn(env, ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
-    
-    release_rtxn_wrapper(ltxn);
-    
-    if (!ltxn->has_writes) {
-        // Read-only transaction, commit immediately
-        release_ltxn(ltxn);
-        napi_value result;
-        ASSERT_OR_RETURN(napi_get_boolean(env, false, &result) == napi_ok, NULL);
-        return result;
-    }
-    
-    // Transaction has writes, prepare for async processing
-    ltxn->state = TRANSACTION_COMMITTING;
-    ltxn->env = env;
-    
-    // Store callback reference
-    napi_valuetype valuetype;
-    if (argc > 1 && napi_typeof(env, argv[1], &valuetype) == napi_ok && valuetype == napi_function) {
-        status = napi_create_reference(env, argv[1], 1, &ltxn->callback_ref);
-        if (status != napi_ok) {
-            LOG_INTERNAL_ERROR("Failed to create callback reference for transaction %d", ltxn_id);
-            ltxn->callback_ref = NULL;
-        }
-    } else {
-        ltxn->callback_ref = NULL; // No callback provided
-    }
-    
-    // Add transaction to the queue
-    ltxn->next = NULL;
-    if (last_queued_ltxn) {
-        last_queued_ltxn->next = ltxn;
-    } else {
-        first_queued_ltxn = ltxn;
-    }
-    last_queued_ltxn = ltxn;
-    
-    // This will do nothing if a worker is already running
-    start_worker();
-    
-    napi_value result;
-    ASSERT_OR_RETURN(napi_get_boolean(env, true, &result) == napi_ok, NULL);
-    return result;
-}
-
-napi_value js_abort_transaction(napi_env env, napi_callback_info info) {
-    napi_status status;
-    size_t argc = 1;
-    napi_value argv[1];
-    
-    status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (status != napi_ok || argc < 1) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID, got %zu arguments", argc);
-    }
-    
-    int32_t ltxn_id;
-    status = napi_get_value_int32(env, argv[0], &ltxn_id);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID as integer");
-    }
-    
-    ltxn_t *ltxn = id_to_open_ltxn(env, ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
-    
-    release_rtxn_wrapper(ltxn);
-    release_ltxn(ltxn);
-    
-    napi_value result;
-    ASSERT_OR_RETURN(napi_get_undefined(env, &result) == napi_ok, NULL);
-    return result;
-}
-
-napi_value js_get(napi_env env, napi_callback_info info) {
-    napi_status status;
-    size_t argc = 2;
-    napi_value argv[2];
-    
-    status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (status != napi_ok || argc < 2) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID and key, got %zu arguments", argc);
-    }
-    
-    int32_t ltxn_id;
-    status = napi_get_value_int32(env, argv[0], &ltxn_id);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID as integer");
-    }
-    
-    char *key_data;
-    size_t key_size;
-    status = napi_get_arraybuffer_info(env, argv[1], (void**)&key_data, &key_size);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected key as ArrayBuffer");
-    }
-    
+int put(int ltxn_id, const void *key_data, size_t key_size, const void *value_data, size_t value_size) {
     if (key_size > MAX_KEY_LENGTH) {
-        THROW_DB_ERROR(env, NULL, "KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
-                      key_size, MAX_KEY_LENGTH);
+        SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
+                  key_size, MAX_KEY_LENGTH);
+        return 0;
     }
     
-    ltxn_t *ltxn = id_to_open_ltxn(env, ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
+    ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
+    if (!ltxn) return 0; // Error already set
+    
+    add_update_log(ltxn, key_size, key_data, value_size, value_data);
+    ltxn->has_writes = 1;
+    
+    return 1;
+}
+
+int del(int ltxn_id, const void *key_data, size_t key_size) {
+    if (key_size > MAX_KEY_LENGTH) {
+        SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
+                  key_size, MAX_KEY_LENGTH);
+        return 0;
+    }
+    
+    ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
+    if (!ltxn) return 0; // Error already set
+    
+    add_update_log(ltxn, key_size, key_data, 0, NULL);
+    ltxn->has_writes = 1;
+    
+    return 1;
+}
+
+int get(int ltxn_id, const void *key_data, size_t key_size, void **value_data, size_t *value_size) {
+    if (key_size > MAX_KEY_LENGTH) {
+        SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
+                  key_size, MAX_KEY_LENGTH);
+        return 0;
+    }
+    
+    ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
+    if (!ltxn) return 0; // Error already set
     
     // First check if we have any PUT/DEL operations for this key in our buffer
     update_log_t *update_log = find_update_log(ltxn, key_size, key_data, 0);
@@ -1166,209 +903,93 @@ napi_value js_get(napi_env env, napi_callback_info info) {
         // Found in buffer, return the value
         if (update_log->value_size == 0) {
             // It's a delete operation
-            napi_value result;
-            ASSERT_OR_RETURN(napi_get_undefined(env, &result) == napi_ok, NULL);
-            return result;
+            *value_data = NULL;
+            *value_size = 0;
+            return 0; // Key not found (was deleted)
         }
         
-        // Create ArrayBuffer for the value
-        napi_value result_buffer;
-        ASSERT_OR_RETURN(napi_create_external_arraybuffer(env, update_log->data + update_log->key_size, 
-                        update_log->value_size, NULL, NULL, &result_buffer) == napi_ok, NULL);
-        return result_buffer;
+        *value_data = update_log->data + update_log->key_size;
+        *value_size = update_log->value_size;
+        return 1;
     }
     
     // Not found in buffer, do LMDB lookup
     MDB_val key, value;
-    key.mv_data = key_data;
+    key.mv_data = (void*)key_data;
     key.mv_size = key_size;
     int rc = mdb_get(ltxn->rtxn_wrapper->rtxn, dbi, &key, &value);
     
     if (rc == MDB_SUCCESS || rc == MDB_NOTFOUND) {
-        read_log_t *read_log = create_read_log(ltxn, sizeof(get_log_t) + key_size, 0);
+        read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + key_size, 0);
         if (read_log) {
-            read_log->get.checksum = (rc == MDB_NOTFOUND) ? 0 : checksum((char *)value.mv_data, value.mv_size, CHECKSUM_INITIAL);
-            read_log->get.key_size = key_size;
-            memcpy(read_log->get.key_data, key_data, key_size);
+            read_log->checksum = (rc == MDB_NOTFOUND) ? 0 : checksum(value.mv_data, value.mv_size, CHECKSUM_INITIAL);
+            read_log->key_size = key_size;
+            memcpy(read_log->key_data, key_data, key_size);
         }
     }
     
     if (rc == MDB_NOTFOUND) {
-        napi_value result;
-        ASSERT_OR_RETURN(napi_get_undefined(env, &result) == napi_ok, NULL);
-        return result;
+        *value_data = NULL;
+        *value_size = 0;
+        return 0; // Key not found
     }
     
     if (rc != MDB_SUCCESS) {
-        THROW_LMDB_ERROR(env, NULL, "Get failed", rc);
+        SET_LMDB_ERROR("Get failed", rc);
+        return -1; // Error occurred
     }
     
-    // Create ArrayBuffer for the value
-    napi_value result_buffer;
-    ASSERT_OR_RETURN(napi_create_external_arraybuffer(env, value.mv_data, value.mv_size, NULL, NULL, &result_buffer) == napi_ok, NULL);
-    return result_buffer;
+    *value_data = value.mv_data;
+    *value_size = value.mv_size;
+    return 1;
 }
 
-napi_value js_put(napi_env env, napi_callback_info info) {
-    napi_status status;
-    size_t argc = 3;
-    napi_value argv[3];
-    
-    status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (status != napi_ok || argc < 3) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID, key, and value, got %zu arguments", argc);
-    }
-    
-    int32_t ltxn_id;
-    status = napi_get_value_int32(env, argv[0], &ltxn_id);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID as integer");
-    }
-    
-    char *key_data;
-    size_t key_size;
-    status = napi_get_arraybuffer_info(env, argv[1], (void**)&key_data, &key_size);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected key as ArrayBuffer");
-    }
-    
-    char *value_data;
-    size_t value_size;
-    status = napi_get_arraybuffer_info(env, argv[2], (void**)&value_data, &value_size);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected value as ArrayBuffer");
-    }
-    
-    if (key_size > MAX_KEY_LENGTH) {
-        THROW_DB_ERROR(env, NULL, "KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
-                      key_size, MAX_KEY_LENGTH);
-    }
-    
-    ltxn_t *ltxn = id_to_open_ltxn(env, ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
-    
-    add_update_log(ltxn, key_size, key_data, value_size, value_data);
-    ltxn->has_writes = 1;
-    
-    napi_value result;
-    ASSERT_OR_RETURN(napi_get_undefined(env, &result) == napi_ok, NULL);
-    return result;
-}
-
-napi_value js_del(napi_env env, napi_callback_info info) {
-    napi_status status;
-    size_t argc = 2;
-    napi_value argv[2];
-    
-    status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (status != napi_ok || argc < 2) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID and key, got %zu arguments", argc);
-    }
-    
-    int32_t ltxn_id;
-    status = napi_get_value_int32(env, argv[0], &ltxn_id);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID as integer");
-    }
-    
-    char *key_data;
-    size_t key_size;
-    status = napi_get_arraybuffer_info(env, argv[1], (void**)&key_data, &key_size);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected key as ArrayBuffer");
-    }
-    
-    if (key_size > MAX_KEY_LENGTH) {
-        THROW_DB_ERROR(env, NULL, "KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
-                      key_size, MAX_KEY_LENGTH);
-    }
-    
-    ltxn_t *ltxn = id_to_open_ltxn(env, ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
-    
-    add_update_log(ltxn, key_size, key_data, 0, NULL);
-    ltxn->has_writes = 1;
-    
-    napi_value result;
-    ASSERT_OR_RETURN(napi_get_undefined(env, &result) == napi_ok, NULL);
-    return result;
-}
-
-napi_value js_create_iterator(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value argv[4];
-    
-    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected at least transaction ID, got %zu arguments", argc);
-    }
-    
-    int32_t ltxn_id;
-    if (napi_get_value_int32(env, argv[0], &ltxn_id) != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected transaction ID as integer");
-    }
-    
-    // Fetch the transaction
-    ltxn_t *ltxn = id_to_open_ltxn(env, ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
-    
-    napi_valuetype key_type;
-    
-    // Start key
-    const char *start_key_data = NULL;
-    size_t start_key_size = 0;
-    if (argc >= 2 && napi_typeof(env, argv[1], &key_type) == napi_ok && key_type != napi_null && key_type != napi_undefined) {
-        if (napi_get_arraybuffer_info(env, argv[1], (void**)&start_key_data, &start_key_size) != napi_ok) {
-            THROW_TYPE_ERROR(env, NULL, NULL, "Expected start key as ArrayBuffer or null/undefined");
-        }
-    }
-    
-    // End key
-    const char *end_key_data = NULL;
-    size_t end_key_size = 0;
-    if (argc >= 3 && napi_typeof(env, argv[2], &key_type) == napi_ok && key_type != napi_null && key_type != napi_undefined) {
-        if (napi_get_arraybuffer_info(env, argv[2], (void**)&end_key_data, &end_key_size) != napi_ok) {
-            THROW_TYPE_ERROR(env, NULL, NULL, "Expected end key as ArrayBuffer or null/undefined");
-        }
-    }
-    
+int create_iterator(int ltxn_id, 
+                         const void *start_key_data, size_t start_key_size, 
+                         const void *end_key_data, size_t end_key_size, 
+                         int reverse) {
     if (start_key_size > MAX_KEY_LENGTH) {
-        THROW_DB_ERROR(env, NULL, "KEY_TOO_LONG", "Start key size %zu exceeds maximum allowed length %d", 
-                      start_key_size, MAX_KEY_LENGTH);
+        SET_ERROR("KEY_TOO_LONG", "Start key size %zu exceeds maximum allowed length %d", 
+                  start_key_size, MAX_KEY_LENGTH);
+        return -1;
     }
     
     if (end_key_size > MAX_KEY_LENGTH) {
-        THROW_DB_ERROR(env, NULL, "KEY_TOO_LONG", "End key size %zu exceeds maximum allowed length %d", 
-                      end_key_size, MAX_KEY_LENGTH);
+        SET_ERROR("KEY_TOO_LONG", "End key size %zu exceeds maximum allowed length %d", 
+                  end_key_size, MAX_KEY_LENGTH);
+        return -1;
     }
     
-    // Reverse flag
-    bool reverse = false;
-    if (argc >= 4 && napi_get_value_bool(env, argv[3], &reverse) != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected reverse flag as boolean");
-    }
+    // Fetch the transaction
+    ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
+    if (!ltxn) return -1; // Error already set
     
-    read_log_t *read_log = create_read_log(ltxn, sizeof(iterate_log_t) + end_key_size, reverse ? 1|2 : 1);
-    ASSERT_OR_RETURN(read_log != NULL, NULL);
+    // Create read log with row_count indicating direction (positive for forward, negative for backward)
+    read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + start_key_size, reverse ? -1 : 1);
+    if (!read_log) {
+        SET_ERROR("MEMORY_ERROR", "Failed to allocate memory for iterator");
+        return -1;
+    }
     
     iterator_t *it = allocate_iterator(ltxn);
-    ASSERT_OR_RETURN(it != NULL, NULL);
+    if (!it) return -1; // Error already set
     
     it->end_key_size = (uint16_t)end_key_size;
     it->end_key_data = end_key_data;
     it->next = ltxn->first_iterator;
     ltxn->first_iterator = it;    
-    it->iterate_log = &read_log->iterate;
+    it->iterate_log = read_log;
     
-    // Tag in iterate_log->tagged_next_ptr can be left at 0
-    it->iterate_log->key_size = start_key_size;
-    it->iterate_log->row_count = 0; // Reset row count for this iterator
+    // Reset row count for this iterator - will be incremented as we read
+    read_log->row_count = 0;
+    read_log->key_size = start_key_size;
     if (start_key_size > 0) {
-        memcpy(it->iterate_log->key_data, start_key_data, start_key_size);
+        memcpy(read_log->key_data, start_key_data, start_key_size);
     }
     
     if (start_key_size > 0) {
         it->current_update_log = find_update_log(ltxn, start_key_size, start_key_data, reverse ? 2 : 1);
-        it->lmdb_key.mv_data = (char *)start_key_data; // non-const, but LMDB doesn't modify it
+        it->lmdb_key.mv_data = (void*)start_key_data; // non-const, but LMDB doesn't modify it
         it->lmdb_key.mv_size = start_key_size;
     } else {
         // start at the first/last record
@@ -1379,50 +1000,35 @@ napi_value js_create_iterator(napi_env env, napi_callback_info info) {
     
     int rc = place_cursor(it->cursor, &it->lmdb_key, &it->lmdb_value, reverse);
     if (rc != MDB_SUCCESS) {
-        THROW_LMDB_ERROR(env, NULL, "Place cursor failed", rc);
+        SET_LMDB_ERROR("Place cursor failed", rc);
+        return -1;
     }
     
     uint64_t cs = CHECKSUM_INITIAL;
-    cs = checksum((const char*)it->lmdb_key.mv_data, it->lmdb_key.mv_size, cs);
-    cs = checksum((const char*)it->lmdb_value.mv_data, it->lmdb_value.mv_size, cs);
-    it->iterate_log->checksum = cs;
+    cs = checksum(it->lmdb_key.mv_data, it->lmdb_key.mv_size, cs);
+    cs = checksum(it->lmdb_value.mv_data, it->lmdb_value.mv_size, cs);
+    read_log->checksum = cs;
     
-    napi_value result;
-    ASSERT_OR_RETURN(napi_create_int32(env, iterator_to_id(it), &result) == napi_ok, NULL);
-    return result;
+    return iterator_to_id(it);
 }
 
-napi_value js_read_iterator(napi_env env, napi_callback_info info) {
-    napi_status status;
-    size_t argc = 1;
-    napi_value argv[1];
+int read_iterator(int iterator_id, void **key_data, size_t *key_size, void **value_data, size_t *value_size) {
+    iterator_t *it = id_to_open_iterator(iterator_id);
+    if (!it) return 0; // Error already set
     
-    status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (status != napi_ok || argc < 1) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected iterator ID, got %zu arguments", argc);
-    }
+    ltxn_t *ltxn = id_to_open_ltxn(it->ltxn_id);
+    if (!ltxn) return 0; // Error already set
     
-    int32_t iterator_id;
-    status = napi_get_value_int32(env, argv[0], &iterator_id);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected iterator ID as integer");
-    }
+    // The reverse flag is determined by the sign of row_count in the iterate_log
+    int reverse = it->iterate_log->row_count < 0;
     
-    iterator_t *it = id_to_open_iterator(env, iterator_id);
-    if (!it) return NULL; // Error already thrown
-    
-    ltxn_t *ltxn = id_to_open_ltxn(env, it->ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
-    
-    // The reverse flag is stored in the iterate_log->tagged_next_ptr
-    int reverse = get_ptr_tag(it->iterate_log->tagged_next_ptr) & 2;
-    
-    restart_read_iterator:
+restart_read_iterator:
     int cmp;
     if (it->current_update_log) {
         if (it->lmdb_key.mv_data) {
             // Both are present.. we need to merge!
-            cmp = compare_keys(it->lmdb_key.mv_size, (const char*)it->lmdb_key.mv_data, it->current_update_log->key_size, it->current_update_log->data);
+            cmp = compare_keys(it->lmdb_key.mv_size, (const char*)it->lmdb_key.mv_data, 
+                               it->current_update_log->key_size, it->current_update_log->data);
             // When equal (0): take from both, but return update_log value
             if (reverse) cmp = -cmp; // Reverse comparison for backwards iteration
         } else {
@@ -1432,9 +1038,11 @@ napi_value js_read_iterator(napi_env env, napi_callback_info info) {
         if (it->lmdb_key.mv_data) {
             cmp = -1; // Take from lmdb
         } else { // No more items to read
-            napi_value result_undefined;
-            ASSERT_OR_RETURN(napi_get_undefined(env, &result_undefined) == napi_ok, NULL);
-            return result_undefined;
+            *key_data = NULL;
+            *key_size = 0;
+            *value_data = NULL;
+            *value_size = 0;
+            return 0; // No more items
         }
     }
     
@@ -1452,7 +1060,8 @@ napi_value js_read_iterator(napi_env env, napi_callback_info info) {
             it->lmdb_key.mv_data = it->lmdb_value.mv_data = NULL; // mark cursor as at the end of the database
             it->lmdb_key.mv_size = it->lmdb_value.mv_size = 0;
         } else if (rc != MDB_SUCCESS) {
-            THROW_LMDB_ERROR(env, NULL, "Cursor next failed", rc);
+            SET_LMDB_ERROR("Cursor next failed", rc);
+            return -1;
         }
         
         uint64_t cs = it->iterate_log->checksum;
@@ -1460,7 +1069,8 @@ napi_value js_read_iterator(napi_env env, napi_callback_info info) {
         cs = checksum((const char*)it->lmdb_value.mv_data, it->lmdb_value.mv_size, cs);
         it->iterate_log->checksum = cs;
         
-        it->iterate_log->row_count++;
+        // Update row count: increment for forward, decrement for reverse
+        it->iterate_log->row_count += reverse ? -1 : 1;
     }
     
     if (cmp >= 0) { // Take from update_log (can be in addition to lmdb above, when key matches)
@@ -1481,57 +1091,32 @@ napi_value js_read_iterator(napi_env env, napi_callback_info info) {
     if (it->end_key_data) {
         cmp = compare_keys(key.mv_size, key.mv_data, it->end_key_size, it->end_key_data);
         if (reverse ? cmp <= 0 : cmp >= 0) {
-            // We're at or past end key. Mark iterator as done and return undefined.
+            // We're at or past end key. Mark iterator as done and return NULL.
             it->current_update_log = NULL; // Mark log iterator as done
             it->lmdb_key.mv_data = NULL; // Mark LMDB cursor as done
             it->lmdb_key.mv_size = 0;
-            napi_value result_undefined;
-            ASSERT_OR_RETURN(napi_get_undefined(env, &result_undefined) == napi_ok, NULL);
-            return result_undefined;
+            *key_data = NULL;
+            *key_size = 0;
+            *value_data = NULL;
+            *value_size = 0;
+            return 0; // No more items
         }
     }
     
-    // Create result object with key and value ArrayBuffers
-    napi_value result_obj;
-    ASSERT_OR_RETURN(napi_create_object(env, &result_obj) == napi_ok, NULL);
-    
-    // Create key ArrayBuffer
-    napi_value key_buffer;
-    ASSERT_OR_RETURN(napi_create_external_arraybuffer(env, key.mv_data, key.mv_size, NULL, NULL, &key_buffer) == napi_ok, NULL);
-    
-    // Create value ArrayBuffer
-    napi_value val_buffer;
-    ASSERT_OR_RETURN(napi_create_external_arraybuffer(env, val.mv_data, val.mv_size, NULL, NULL, &val_buffer) == napi_ok, NULL);
-    
-    // Set properties
-    ASSERT_OR_RETURN(napi_set_named_property(env, result_obj, "key", key_buffer) == napi_ok, NULL);
-    ASSERT_OR_RETURN(napi_set_named_property(env, result_obj, "value", val_buffer) == napi_ok, NULL);
-    
-    return result_obj;
+    *key_data = key.mv_data;
+    *key_size = key.mv_size;
+    *value_data = val.mv_data;
+    *value_size = val.mv_size;
+    return 1;
 }
 
-napi_value js_close_iterator(napi_env env, napi_callback_info info) {
-    napi_status status;
-    size_t argc = 1;
-    napi_value argv[1];
-    
-    status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (status != napi_ok || argc < 1) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected iterator ID, got %zu arguments", argc);
-    }
-    
-    int32_t iterator_id;
-    status = napi_get_value_int32(env, argv[0], &iterator_id);
-    if (status != napi_ok) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "Expected iterator ID as integer");
-    }
-    
+int close_iterator(int iterator_id) {
     // Fetch the iterator
-    iterator_t *iterator = id_to_open_iterator(env, iterator_id);
-    if (!iterator) return NULL; // Error already thrown
+    iterator_t *iterator = id_to_open_iterator(iterator_id);
+    if (!iterator) return 0; // Error already set
     
-    ltxn_t *ltxn = id_to_open_ltxn(env, iterator->ltxn_id);
-    if (!ltxn) return NULL; // Error already thrown
+    ltxn_t *ltxn = id_to_open_ltxn(iterator->ltxn_id);
+    if (!ltxn) return 0; // Error already set
     
     // Remove iterator from the transaction's linked list    
     if (iterator == ltxn->first_iterator) {
@@ -1552,143 +1137,95 @@ napi_value js_close_iterator(napi_env env, napi_callback_info info) {
     iterator->next = first_free_iterator;
     first_free_iterator = iterator;
     
-    napi_value result;
-    ASSERT_OR_RETURN(napi_get_undefined(env, &result) == napi_ok, NULL);
-    return result;
+    return 1;
 }
 
-napi_value js_open_lmdb(napi_env env, napi_callback_info info) {
-    // Get optional db_dir argument
-    size_t argc = 1;
-    napi_value argv[1];
-    char *db_dir = NULL;
-    char db_dir_buffer[512];
+int commit_transaction(int ltxn_id) {
+    ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
+    if (!ltxn) return 0; // Error already set
     
-    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) == napi_ok && argc >= 1) {
-        // Get the database directory argument
-        if (napi_get_value_string_utf8(env, argv[0], db_dir_buffer, sizeof(db_dir_buffer), NULL) != napi_ok) {
-            THROW_TYPE_ERROR(env, NULL, NULL, "Expected database path as string");
+    release_rtxn_wrapper(ltxn);
+    
+    if (!ltxn->has_writes) {
+        // Read-only transaction, commit immediately
+        release_ltxn(ltxn);
+        return 0; // No async work needed
+    }
+
+    // Allow the read iterators to be recycled
+    release_ltxn_iterators(ltxn);
+    
+    // Transaction has writes, prepare for async processing
+    ltxn->state = TRANSACTION_COMMITTING;
+    
+    // Add transaction to the queue
+    ltxn->next = ltxn_commit_queue_head;
+    ltxn_commit_queue_head = ltxn;
+
+    // Notify the commit worker that there's work to do
+    commit_command_t commit_command = {
+        .type = 'c',
+        .ltxn = ltxn
+    };
+    if (send(commit_worker_fd, &commit_command, sizeof(commit_command), 0) < 0) {
+        LOG_INTERNAL_ERROR("Failed to send commit command: %s", strerror(errno));
+        reconnect_commit_worker();
+    }
+
+    return 1; // Async work queued
+}
+
+// This function should be called periodically, or when data is available on the commit worker fd
+// Returns...
+// > 0: number of results returned
+// 0: no results, but call again later as ltxns are still being committed
+// -1: no results, and no more ltxns are being committed
+int get_commit_results(commit_result_t *results, int max_results) {
+    // In case our user doesn't use the commit worker fd to monitor for signals,
+    // we need to drain it, to make sure it doesn't fill up and block the worker.
+    // Also, we want to check if the fd is still valid (meaning the worker is still running).
+    while (1) {
+        char d;
+        int rc = recv(commit_worker_fd, &d, 1, MSG_DONTWAIT);
+        if (rc < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Drained!
+            if (errno == EINTR) continue; // Interrupted, try again
         }
-        db_dir = db_dir_buffer;
+        else if (rc > 0) continue; // Data received
+        // An error or EOF
+        reconnect_commit_worker();
+        break;
     }
-    
-    if (!open_lmdb(env, db_dir)) return NULL; // Error already thrown
-    
-    napi_value result;
-    ASSERT_OR_RETURN(napi_get_undefined(env, &result) == napi_ok, NULL);
-    return result;
+
+    ltxn_t *new_head = NULL;
+    ltxn_t *ltxn = ltxn_commit_queue_head;
+
+    int result_count = 0;
+    while (ltxn && result_count < max_results) {
+        ltxn_t *next = ltxn->next;
+        if (ltxn->state == TRANSACTION_COMMITTING) {
+            // Not done yet
+            ltxn->next = new_head;
+            new_head = ltxn;
+        } else {
+            results[result_count].ltxn_id = ltxn_to_id(ltxn);
+            results[result_count].success = (ltxn->state == TRANSACTION_SUCCEEDED) ? 1 : 0;
+            result_count++;
+            release_ltxn(ltxn);
+        }
+        ltxn = next;
+    }
+    ltxn_commit_queue_head = new_head;
+
+    return result_count ? result_count : (ltxn_commit_queue_head ? - 1: 0);
 }
 
-// DatabaseError constructor
-napi_value database_error_constructor(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value args[2];
-    napi_value js_this;
-
-    ASSERT_OR_RETURN(napi_get_cb_info(env, info, &argc, args, &js_this, NULL) == napi_ok, NULL);
-
-    if (argc < 1) {
-        THROW_TYPE_ERROR(env, NULL, NULL, "DatabaseError requires at least a message argument");
-    }
-
-    // Set message property
-    ASSERT_OR_RETURN(napi_set_named_property(env, js_this, "message", args[0]) == napi_ok, NULL);
-
-    // Set code property if provided
-    if (argc >= 2) {
-        ASSERT_OR_RETURN(napi_set_named_property(env, js_this, "code", args[1]) == napi_ok, NULL);
-    } else {
-        napi_value undefined;
-        ASSERT_OR_RETURN(napi_get_undefined(env, &undefined) == napi_ok, NULL);
-        ASSERT_OR_RETURN(napi_set_named_property(env, js_this, "code", undefined) == napi_ok, NULL);
-    }
-
-    // Set name property
-    napi_value name;
-    ASSERT_OR_RETURN(napi_create_string_utf8(env, "DatabaseError", NAPI_AUTO_LENGTH, &name) == napi_ok, NULL);
-    ASSERT_OR_RETURN(napi_set_named_property(env, js_this, "name", name) == napi_ok, NULL);
-
-    return js_this;
+int abort_transaction(int ltxn_id) {
+    ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
+    if (!ltxn) return 0; // Error already set
+    
+    release_rtxn_wrapper(ltxn);
+    release_ltxn(ltxn);
+    
+    return 1;
 }
-
-// Module initialization
-napi_value Init(napi_env env, napi_value exports) {
-    napi_status status;
-    napi_value fn;
-
-    // Create DatabaseError constructor
-    napi_value database_error_ctor;
-    status = napi_create_function(env, "DatabaseError", NAPI_AUTO_LENGTH, database_error_constructor, NULL, &database_error_ctor);
-    ASSERT_OR_RETURN(status == napi_ok, NULL);
-
-    // Get Error constructor to inherit from
-    napi_value global;
-    ASSERT_OR_RETURN(napi_get_global(env, &global) == napi_ok, NULL);
-    
-    napi_value error_ctor;
-    ASSERT_OR_RETURN(napi_get_named_property(env, global, "Error", &error_ctor) == napi_ok, NULL);
-
-    // Set up prototype chain
-    napi_value error_prototype;
-    ASSERT_OR_RETURN(napi_get_named_property(env, error_ctor, "prototype", &error_prototype) == napi_ok, NULL);
-
-    napi_value database_error_prototype;
-    ASSERT_OR_RETURN(napi_create_object(env, &database_error_prototype) == napi_ok, NULL);
-
-    // Set DatabaseError.prototype.__proto__ = Error.prototype
-    ASSERT_OR_RETURN(napi_set_named_property(env, database_error_prototype, "__proto__", error_prototype) == napi_ok, NULL);
-
-    // Set DatabaseError.prototype
-    ASSERT_OR_RETURN(napi_set_named_property(env, database_error_ctor, "prototype", database_error_prototype) == napi_ok, NULL);
-
-    // Export DatabaseError
-    ASSERT_OR_RETURN(napi_set_named_property(env, exports, "DatabaseError", database_error_ctor) == napi_ok, NULL);
-
-    // Store reference for later use
-    ASSERT_OR_RETURN(napi_create_reference(env, database_error_ctor, 1, &database_error_constructor_ref) == napi_ok, NULL);
-
-    // Function exports table
-    struct {
-        const char* name;
-        napi_callback callback;
-    } functions[] = {
-        {"open", js_open_lmdb},
-        {"startTransaction", js_start_transaction},
-        {"commitTransaction", js_commit_transaction},
-        {"abortTransaction", js_abort_transaction},
-        {"get", js_get},
-        {"put", js_put},
-        {"del", js_del},
-        {"createIterator", js_create_iterator},
-        {"readIterator", js_read_iterator},
-        {"closeIterator", js_close_iterator}
-    };
-    
-    // Export functions
-    for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
-        status = napi_create_function(env, NULL, 0, functions[i].callback, NULL, &fn);
-        ASSERT_OR_RETURN(status == napi_ok, NULL);
-        ASSERT_OR_RETURN(napi_set_named_property(env, exports, functions[i].name, fn) == napi_ok, NULL);
-    }
-    
-    // Export state constants
-    struct {
-        const char* name;
-        int value;
-    } constants[] = {
-        {"TRANSACTION_RACED", TRANSACTION_RACED},
-        {"TRANSACTION_SUCCEEDED", TRANSACTION_SUCCEEDED},
-        {"TRANSACTION_FAILED", TRANSACTION_FAILED}
-    };
-    
-    // Export constants
-    for (size_t i = 0; i < sizeof(constants) / sizeof(constants[0]); i++) {
-        napi_value constant_value;
-        ASSERT_OR_RETURN(napi_create_int32(env, constants[i].value, &constant_value) == napi_ok, NULL);
-        ASSERT_OR_RETURN(napi_set_named_property(env, exports, constants[i].name, constant_value) == napi_ok, NULL);
-    }
-    
-    return exports;
-}
-
-NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)

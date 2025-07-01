@@ -5,7 +5,8 @@
       "sources": [
         "lowlevel/mdb.c",
         "lowlevel/midl.c",
-        "lowlevel/lowlevel.c"
+        "lowlevel/lowlevel.c",
+        "lowlevel/lowlevel-napi.c"
       ],
       "include_dirs": [
         "lowlevel"
