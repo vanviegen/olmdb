@@ -4,7 +4,7 @@
 #define _GNU_SOURCE // For memfd_create
 #include <sys/mman.h>
 #include "commit_worker.c"
-#include "lowlevel-internal.h"
+#include "lowlevel_internal.h"
 #include "lowlevel.h"
 #include <assert.h>
 #include <errno.h>
@@ -199,7 +199,7 @@ log_buffer_t *allocate_shared_memory_blocks(uint32_t blocks) {
     log_buffer_t *new_buf = (log_buffer_t *)shared_memory_unused_start;
     shared_memory_unused_start += LOG_BUFFER_BLOCK_SIZE * blocks;
     if (shared_memory_unused_start > shared_memory_unused_end) {
-        SET_ERROR("OUT_OF_MEMORY", "Not enough shared memory for %u blocks of size %d bytes", blocks, LOG_BUFFER_BLOCK_SIZE);
+        SET_ERROR("OOM", "Not enough shared memory for %u blocks of size %d bytes", blocks, LOG_BUFFER_BLOCK_SIZE);
         return NULL;
     }
     return new_buf;
@@ -717,7 +717,7 @@ void reconnect_commit_worker() {
 
 int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
     if (dbenv) {
-        SET_ERROR("ALREADY_OPEN", "Database is already init");
+        SET_ERROR("DUP_INIT", "Database is already init");
         return -1;
     }
 
@@ -732,7 +732,7 @@ int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
     }
 
     if (strlen(_db_dir) >= sizeof(db_dir)) {
-        SET_ERROR("DB_DIR_TOO_LONG", "Database directory path exceeds maximum length of %zu characters", sizeof(db_dir) - 1);
+        SET_ERROR("DIR_TOO_LONG", "Database directory path exceeds maximum length of %zu characters", sizeof(db_dir) - 1);
         return -1;
     }
 
@@ -775,7 +775,7 @@ int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
         set_signal_fd_callback(commit_worker_fd);
     }
 
-    return commit_worker_fd;
+    return 0;
 }
 
 int init_lmdb() {
@@ -842,7 +842,7 @@ int init_lmdb() {
 
 int start_transaction() {
     if (!dbenv) {
-        SET_ERROR("NOT_OPEN", "Database is not init");
+        SET_ERROR("NOT_INIT", "Database is not init");
         return -1;
     }
 
@@ -859,43 +859,43 @@ int put(int ltxn_id, const void *key_data, size_t key_size, const void *value_da
     if (key_size > MAX_KEY_LENGTH) {
         SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
                   key_size, MAX_KEY_LENGTH);
-        return 0;
+        return -1;
     }
     
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
-    if (!ltxn) return 0; // Error already set
+    if (!ltxn) return -1; // Error already set
     
     add_update_log(ltxn, key_size, key_data, value_size, value_data);
     ltxn->has_writes = 1;
     
-    return 1;
+    return 0;
 }
 
 int del(int ltxn_id, const void *key_data, size_t key_size) {
     if (key_size > MAX_KEY_LENGTH) {
         SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
                   key_size, MAX_KEY_LENGTH);
-        return 0;
+        return -1;
     }
     
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
-    if (!ltxn) return 0; // Error already set
+    if (!ltxn) return -1; // Error already set
     
     add_update_log(ltxn, key_size, key_data, 0, NULL);
     ltxn->has_writes = 1;
     
-    return 1;
+    return 0;
 }
 
 int get(int ltxn_id, const void *key_data, size_t key_size, void **value_data, size_t *value_size) {
     if (key_size > MAX_KEY_LENGTH) {
         SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
                   key_size, MAX_KEY_LENGTH);
-        return 0;
+        return -1;
     }
     
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
-    if (!ltxn) return 0; // Error already set
+    if (!ltxn) return -1; // Error already set
     
     // First check if we have any PUT/DEL operations for this key in our buffer
     update_log_t *update_log = find_update_log(ltxn, key_size, key_data, 0);
@@ -967,7 +967,7 @@ int create_iterator(int ltxn_id,
     // Create read log with row_count indicating direction (positive for forward, negative for backward)
     read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + start_key_size, reverse ? -1 : 1);
     if (!read_log) {
-        SET_ERROR("MEMORY_ERROR", "Failed to allocate memory for iterator");
+        SET_ERROR("OOM", "Failed to allocate memory for iterator");
         return -1;
     }
     
@@ -1014,10 +1014,10 @@ int create_iterator(int ltxn_id,
 
 int read_iterator(int iterator_id, void **key_data, size_t *key_size, void **value_data, size_t *value_size) {
     iterator_t *it = id_to_open_iterator(iterator_id);
-    if (!it) return 0; // Error already set
+    if (!it) return -1; // Error already set
     
     ltxn_t *ltxn = id_to_open_ltxn(it->ltxn_id);
-    if (!ltxn) return 0; // Error already set
+    if (!ltxn) return -1; // Error already set
     
     // The reverse flag is determined by the sign of row_count in the iterate_log
     int reverse = it->iterate_log->row_count < 0;
@@ -1113,10 +1113,10 @@ restart_read_iterator:
 int close_iterator(int iterator_id) {
     // Fetch the iterator
     iterator_t *iterator = id_to_open_iterator(iterator_id);
-    if (!iterator) return 0; // Error already set
+    if (!iterator) return -1; // Error already set
     
     ltxn_t *ltxn = id_to_open_ltxn(iterator->ltxn_id);
-    if (!ltxn) return 0; // Error already set
+    if (!ltxn) return -1; // Error already set
     
     // Remove iterator from the transaction's linked list    
     if (iterator == ltxn->first_iterator) {
@@ -1137,19 +1137,19 @@ int close_iterator(int iterator_id) {
     iterator->next = first_free_iterator;
     first_free_iterator = iterator;
     
-    return 1;
+    return 0;
 }
 
 int commit_transaction(int ltxn_id) {
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
-    if (!ltxn) return 0; // Error already set
+    if (!ltxn) return -1; // Error already set
     
     release_rtxn_wrapper(ltxn);
     
     if (!ltxn->has_writes) {
         // Read-only transaction, commit immediately
         release_ltxn(ltxn);
-        return 0; // No async work needed
+        return 1; // No async work needed
     }
 
     // Allow the read iterators to be recycled
@@ -1172,7 +1172,7 @@ int commit_transaction(int ltxn_id) {
         reconnect_commit_worker();
     }
 
-    return 1; // Async work queued
+    return 0; // Async work queued
 }
 
 // This function should be called periodically, or when data is available on the commit worker fd
@@ -1201,10 +1201,10 @@ int get_commit_results(commit_result_t *results, int max_results) {
     ltxn_t *ltxn = ltxn_commit_queue_head;
 
     int result_count = 0;
-    while (ltxn && result_count < max_results) {
+    while (ltxn) {
         ltxn_t *next = ltxn->next;
-        if (ltxn->state == TRANSACTION_COMMITTING) {
-            // Not done yet
+        if (ltxn->state == TRANSACTION_COMMITTING || result_count >= max_results) {
+            // Not done yet (or output buffer full), keep in queue
             ltxn->next = new_head;
             new_head = ltxn;
         } else {
@@ -1222,10 +1222,10 @@ int get_commit_results(commit_result_t *results, int max_results) {
 
 int abort_transaction(int ltxn_id) {
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
-    if (!ltxn) return 0; // Error already set
+    if (!ltxn) return -1; // Error already set
     
     release_rtxn_wrapper(ltxn);
     release_ltxn(ltxn);
     
-    return 1;
+    return 0;
 }

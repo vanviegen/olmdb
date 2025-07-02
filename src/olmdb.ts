@@ -185,7 +185,7 @@ export function transact<T>(fn: () => T): Promise<T> {
  * This function must be called before any database operations.
  * 
  * @param dbDir - Optional directory path for the database (defaults to environment variable $OLMDB_DIR or "./.olmdb").
- * @throws {DatabaseError} With code "ALREADY_OPEN" if database is already initialized.
+ * @throws {DatabaseError} With code "DUP_INIT" if database is already initialized.
  * @throws {DatabaseError} With code "CREATE_DIR_FAILED" if directory creation fails.
  * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
  * 

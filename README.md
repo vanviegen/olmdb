@@ -227,9 +227,13 @@ OLMDB retries a transaction 3 times before giving up (and throwing an exception)
 ## Architecture
 
 ### Components
-OLMDB consists of two parts:
-- A TypeScript file providing the recommended high-level API for this library. This adds automatic transaction retries (in case of race conditions), an implicit transaction context, promise-based transactions and type conversions.
-- A native module, providing a low-level API on which the former is built.
+OLMDB consists of four parts:
+- A TypeScript file providing a high-level API for this library.
+- A NAPI native module, providing low-level functionality on which the former is built. It consists of:
+  - `lowlevel.c`: A C-style API providing a concurrent optimistic read/write transaction abstraction around LMDB.
+  - `commit_worker.c`: Code used by `lowlevel.c` for our singleton commit worker process, started automatically by the first client.
+  - `lowlevel_napi.c`: A NAPI wrapper around the C-style provided by `lowlevel.c`.
+  - The vendored LMDB source files.
 
 ### Transactions
 The native module manages transactions (start, commit, abort), and all read (get, scan) and write (put, del) operations must happen within such a transaction. Multiple transactions can run simultaneously from the same JavaScript process, allowing work for different clients to be interleaved (using async/await or callbacks). 
@@ -266,7 +270,7 @@ I expect this architecture to be able to provide huge throughput and very low la
 In case you eventually need to scale beyond a single server, that can only be done at the application level. 
 
 
-## High-Level API Reference
+## API Reference
 
 The high-level API provides a promise-based, type-safe interface with automatic transaction retries and convenient data type conversions.
 
@@ -291,7 +295,7 @@ try {
   // Try to open again
   open('./database');
 } catch (error) {
-  if (error instanceof DatabaseError && error.code === 'ALREADY_OPEN') {
+  if (error instanceof DatabaseError && error.code === 'DUP_INIT') {
     console.log('Database is already open');
   }
 }
@@ -324,7 +328,7 @@ open('./my-database');
 - `directory` (optional): Database directory path
 
 **Throws:**
-- `DatabaseError` with code `ALREADY_OPEN`: If database is already initialized
+- `DatabaseError` with code `DUP_INIT`: If database is already initialized
 - `DatabaseError` with code `CREATE_DIR_FAILED`: If directory creation fails
 - `DatabaseError` with code `LMDB-{code}`: For LMDB-specific errors
 
@@ -495,79 +499,6 @@ for (const { key, value } of scan({
 
 #### `Data`
 Union type for keys and values: `Uint8Array | ArrayBuffer | string`
-
-
-## Low-Level API example
-
-The low-level API provides direct access to the native LMDB bindings. **Use the high-level API unless you have some very specific requirements.**
-
-```typescript
-import lowlevel from 'olmdb/lowlevel';
-
-// Manual transaction management
-lowlevel.open('./database');
-
-const txnId = lowlevel.startTransaction();
-
-// All operations use ArrayBuffer
-const key = new TextEncoder().encode('test-key').buffer;
-const value = new TextEncoder().encode('test-value').buffer;
-
-lowlevel.put(txnId, key, value);
-const retrieved = lowlevel.get(txnId, key);
-
-// Commit with callback for write transactions
-const isAsync = lowlevel.commitTransaction(txnId, (transactionId, status) => {
-  if (status === lowlevel.TRANSACTION_SUCCEEDED) {
-    console.log('Transaction committed successfully');
-  } else if (status === lowlevel.TRANSACTION_RACED) {
-    console.log('Transaction raced - would need manual retry');
-  }
-});
-
-if (!isAsync) {
-  console.log('Read-only transaction completed immediately');
-}
-
-// Manual iteration
-const txnId2 = lowlevel.startTransaction();
-const iteratorId = lowlevel.createIterator(txnId2);
-let result;
-while ((result = lowlevel.readIterator(iteratorId)) !== undefined) {
-  console.log('Key:', result.key, 'Value:', result.value);
-}
-lowlevel.closeIterator(iteratorId);
-lowlevel.abortTransaction(txnId2);
-```
-
-
-## Low-Level API Reference
-
-#### Database Management
-- **`open(directory?)`**: Initialize database at specified directory. Defaults to `$OLMDB_DIR` environment variable or `./.olmdb`. Throws `DatabaseError` if already open or directory creation fails.
-
-#### Transaction Management
-- **`startTransaction()`**: Begin new transaction, returns transaction ID. Throws `DatabaseError` if transaction limit reached.
-- **`commitTransaction(txnId, callback?)`**: Commit transaction. Returns `false` for read-only transactions (completed immediately) or `true` for write transactions. Transaction becomes invalid after commit. When a write transaction completes, `callback(txnId, result)` will be called, where `result` is one of `TRANSACTION_SUCCEEDED` (writes have been committed to disk), `TRANSACTION_RACED` (the read results have changed since the transaction started, no writes have been performed) or `TRANSACTION_FAILED` (an unexpected error occurred, see stderr for details).
-- **`abortTransaction(txnId)`**: Abort transaction and release resources. Transaction becomes invalid after abort.
-
-The transaction id `txnId` is a number (within the 32 bit integer range).
-
-#### Data Operations
-- **`get(txnId, key)`**: Retrieve value by key. Returns `ArrayBuffer` or `undefined` if not found. Zero-copy operation.
-- **`put(txnId, key, value)`**: Store key-value pair. Both key and value must be `ArrayBuffer`.
-- **`del(txnId, key)`**: Delete key from database. Key must be `ArrayBuffer`.
-
-Keys and values are `ArrayBuffer` objects.
-
-#### Iterator Operations
-- **`createIterator(txnId, startKey?, endKey?, reverse?)`**: Create iterator for scanning. Returns iterator ID. Iterators are automatically closed when transaction ends or when they reach the end.
-- **`readIterator(iteratorId)`**: Read next item from iterator. Returns `{key: ArrayBuffer, value: ArrayBuffer}` or `undefined` when exhausted. Iterator auto-closes when exhausted.
-- **`closeIterator(iteratorId)`**: Manually close iterator and free resources. Safe to call multiple times.
-
-The iterator id `iteratorId` is a number (within the 32 bit integer range). The `reverse` flag is a boolean, defaulting to false.
-
-**Note**: Iterators are automatically closed when their transaction ends, when they're exhausted by reading all items, or when manually closed. You can close iterators early if you don't iterate to completion to free resources immediately.
 
 
 ## License

@@ -31,7 +31,7 @@ describe('LMDB', () => {
         try {
             open("./.olmdb_test");
         } catch (error: any) {
-            if (error.code !== "ALREADY_OPEN") {
+            if (error.code !== "DUP_INIT") {
                 throw error; // Rethrow if it's not the expected error
             }
         }

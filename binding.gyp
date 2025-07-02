@@ -6,7 +6,7 @@
         "lowlevel/mdb.c",
         "lowlevel/midl.c",
         "lowlevel/lowlevel.c",
-        "lowlevel/lowlevel-napi.c"
+        "lowlevel/lowlevel_napi.c"
       ],
       "include_dirs": [
         "lowlevel"
