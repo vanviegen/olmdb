@@ -274,6 +274,8 @@ In case you eventually need to scale beyond a single server, that can only be do
 
 The high-level API provides a promise-based, type-safe interface with automatic transaction retries and convenient data type conversions.
 
+The following is auto-generated from `src/olmdb.ts`:
+
 ### Error Handling
 
 OLMDB uses a custom `DatabaseError` class that extends the standard JavaScript `Error` class. This provides structured error handling with specific error codes.
@@ -500,6 +502,12 @@ for (const { key, value } of scan({
 #### `Data`
 Union type for keys and values: `Uint8Array | ArrayBuffer | string`
 
+
+## Low-level API Reference
+
+The low-level API is what's exposed by the native module. It's a somewhat less convenient than the high-level API, but it's a good starting point if you require a different abstraction.
+
+The following is auto-generated from `src/lowlevel.ts`:
 
 ## License
 
