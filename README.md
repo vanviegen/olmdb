@@ -63,17 +63,17 @@ npm install olmdb
 ## High-level API Tutorial
 
 ### Initialization
-The database auto-initializes on first use, but you can explicitly open it specifying a directory for the database file.
+The database auto-initializes on first use, but you can explicitly initialize it specifying a directory for the database file.
 
 ```typescript
-import { open } from 'olmdb';
+import { init } from 'olmdb';
 
-open('./my-app-data'); // Custom directory
+init('./my-app-data'); // Custom directory
 ```
 
-The call to `open` may happen only once, and should be done before the first call to `transact`.
+The call to `init` may happen only once, and should be done before the first call to `transact`.
 
-Without an explicit directory, the `OLMDB_DIR` environment variable is used or if that isn't set `.olmdb` is used.
+Without an explicit directory, the `OLMDB_DIR` environment variable is used or if that isn't set `./.olmdb` is used.
 
 ### Basic Operations
 All database operations must be performed within a transaction:
@@ -288,15 +288,15 @@ class DatabaseError extends Error {
 
 **Example:**
 ```typescript
-import { DatabaseError, open } from 'olmdb';
+import { DatabaseError, init } from 'olmdb';
 
 try {
-  open('./database');
-  // Try to open again
-  open('./database');
+  init('./database');
+  // Try to init again
+  init('./database');
 } catch (error) {
   if (error instanceof DatabaseError && error.code === 'DUP_INIT') {
-    console.log('Database is already open');
+    console.log('Database already initialized');
   }
 }
 ```
@@ -305,23 +305,23 @@ try {
 For basic API usage errors, such as invalid parameter counts or types, a `TypeError` is thrown. These types of errors generally don't benefit from a machine readable error `code`, as they can't be handled gracefully by code but just need to be fixed by the programmer.
 
 ```typescript
-import { transact } from 'olmdb';
-open(123); // Throws TypeError("Expected database path as string")
+import { init } from 'olmdb';
+init(123); // Throws TypeError("Expected database path as string")
 ```
 
 ### Database Management
 
-#### `open(directory?)`
+#### `init(directory?)`
 Initialize the database with an optional directory path.
 
 ```typescript
-import { open } from 'olmdb';
+import { init } from 'olmdb';
 
 // Use default directory (.olmdb or $OLMDB_DIR)
-open();
+init();
 
 // Use custom directory
-open('./my-database');
+init('./my-database');
 ```
 
 **Parameters:**

@@ -20,41 +20,60 @@ interface Transaction {
     retryCount: number;
 }
 
+// Track pending transactions by ID
+const pendingTransactions = new Map<number, Transaction>();
+// Track if database has been initialized
+let isInitialized = false;
+
+// Global commit handler that will be passed to lowlevel.init
+function globalCommitHandler(transactionId: number, success: boolean): void {
+    const txn = pendingTransactions.get(transactionId);
+    if (!txn) {
+        console.warn(`Received commit for unknown transaction ${transactionId}`);
+        return;
+    }
+    
+    pendingTransactions.delete(transactionId);
+    txn.id = -1; // Mark as done
+    
+    if (success) {
+        txn.resolve(txn.result);
+    } else {
+        // Attempt retry if transaction failed due to conflicts
+        txn.retryCount++;
+        if (txn.retryCount > 3) {
+            txn.reject(new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
+        } else {
+            console.log(`Retrying failed transaction (${txn.retryCount}/3)`);
+            try_transaction(txn); // Retry the transaction
+        }
+    }
+}
+
 async function try_transaction(txn: Transaction) {
     txn.id = lowlevel.startTransaction();
+    pendingTransactions.set(txn.id, txn);
+    
     transactionStorage.run(txn, async () => {
         try {
             txn.result = await txn.fn();
         } catch(err) {
             lowlevel.abortTransaction(txn.id);
+            pendingTransactions.delete(txn.id);
             txn.id = -1; // Mark as done
             txn.reject(err);
             return;
         }
-        const onCommitResult = (_transactionId: any, status: number): void => {
-            txn.id = -1; // Mark as done (for now)
-            if (status === lowlevel.TRANSACTION_SUCCEEDED) {
-                txn.resolve(txn.result);
-            } else if (status === lowlevel.TRANSACTION_RACED) {
-                // If validation failed, we can retry the transaction
-                txn.retryCount++;
-                if (txn.retryCount > 3) {
-                    txn.reject(new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
-                } else {
-                    console.log(`Retrying raced transaction (${txn.retryCount}/3)`);
-                    try_transaction(txn); // Retry the transaction
-                }
-            } else {
-                txn.reject(new DatabaseError(`Transaction failed with status ${status}`, "TRANSACTION_FAILED"));
-            }
-        };
-        const asyncResult = lowlevel.commitTransaction(txn.id, onCommitResult);
-        if (!asyncResult) {
+        
+        const immediateCommit = lowlevel.commitTransaction(txn.id);
+        if (immediateCommit) {
             // Read-only transaction completed immediately
+            pendingTransactions.delete(txn.id);
+            txn.id = -1;
             txn.resolve(txn.result);
         }
-        // Otherwise, onCommitResult will be called later
-    })
+        // Otherwise, globalCommitHandler will be called later
+    });
 }
 
 const transactionStorage = new AsyncLocalStorage<Transaction|undefined>();
@@ -143,6 +162,26 @@ export function del(key: Data): void {
 }
 
 /**
+ * Initialize the database with the specified directory path.
+ * This function may only be called once. If it is not called before the first transact(),
+ * the database will be automatically initialized with the default directory.
+ * 
+ * @param dbDir - Optional directory path for the database (defaults to environment variable $OLMDB_DIR or "./.olmdb").
+ * @throws {DatabaseError} With code "DUP_INIT" if database is already initialized.
+ * @throws {DatabaseError} With code "CREATE_DIR_FAILED" if directory creation fails.
+ * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
+ * 
+ * @example
+ * ```typescript
+ * init("./my-database");
+ * ```
+ */
+export function init(dbDir?: string): void {
+    lowlevel.init(globalCommitHandler, dbDir);
+    isInitialized = true;
+}
+
+/**
  * Executes a function within a database transaction context.
  * 
  * All database operations (get, put, del) must be performed within a transaction.
@@ -171,6 +210,9 @@ export function del(key: Data): void {
  * ```
  */
 export function transact<T>(fn: () => T): Promise<T> {
+    // Auto-initialize if needed
+    if (!isInitialized) init();
+
     if (transactionStorage.getStore()) {
         throw new TypeError("Nested transactions are not allowed");
     }
@@ -179,22 +221,6 @@ export function transact<T>(fn: () => T): Promise<T> {
         try_transaction({fn, resolve, reject, retryCount: 0, id: -1});
     });
 }
-
-/**
- * Initialize the database with the specified directory path.
- * This function must be called before any database operations.
- * 
- * @param dbDir - Optional directory path for the database (defaults to environment variable $OLMDB_DIR or "./.olmdb").
- * @throws {DatabaseError} With code "DUP_INIT" if database is already initialized.
- * @throws {DatabaseError} With code "CREATE_DIR_FAILED" if directory creation fails.
- * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
- * 
- * @example
- * ```typescript
- * open("./my-database");
- * ```
- */
-export const open = lowlevel.open;
 
 /**
  * Represents a key-value pair returned by the iterator
