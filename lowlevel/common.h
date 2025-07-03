@@ -1,9 +1,10 @@
-#ifndef LOWLEVEL_INTERNAL_H
-#define LOWLEVEL_INTERNAL_H
+#ifndef OLMDB_COMMON_H
+#define OLMDB_COMMON_H
 
+#include <stdio.h>
 #include <stdint.h>
-#include "lmdb.h"
-#include "lowlevel.h"
+#include <string.h>
+#include "../vendor/lmdb/lmdb.h"
 
 #define SKIPLIST_DEPTH 4 // Number of levels in the skiplist
 #define LOG_BUFFER_BLOCK_SIZE (64 * 1024)
@@ -19,17 +20,6 @@
 #define TRANSACTION_RACED 3
 #define TRANSACTION_SUCCEEDED 4
 #define TRANSACTION_FAILED 5
-
-extern int log_fd;
-
-#define LOG(fmt, ...) \
-    do { \
-        if (log_fd == -1) { \
-            dprintf(2, "LMDB: " fmt "\n", ##__VA_ARGS__); \
-        } else if (log_fd >= 0) { \
-            dprintf(log_fd, fmt "\n", ##__VA_ARGS__); \
-        } \
-    } while (0)
 
 #define LOG_INTERNAL_ERROR(message, ...) \
     LOG("%s:%d " message, __FILE__, __LINE__, ##__VA_ARGS__)
@@ -49,10 +39,16 @@ extern int log_fd;
         } \
     } while(0)
 
+#define SET_LMDB_ERROR(action, rc, ...) \
+    do { \
+        SET_ERROR("LMDB" #rc, "LMDB " action " failed (%s)", ##__VA_ARGS__, mdb_strerror(rc)); \
+    } while(0)
+
 typedef struct {
     char type; // 'i' for init
     uintptr_t mmap_ptr; // Shared memory base within js process
     size_t mmap_size;
+    uint32_t pid;
     // The mmap fd is sent as ancillary data
 } init_command_t;
 
@@ -76,7 +72,6 @@ typedef struct update_log_struct {
     uint16_t key_size;
     char data[]; // key data + value data
 } __attribute__((aligned(4))) update_log_t;
-
 
 // Buffer structure using flexible array member
 typedef struct log_buffer_struct {
@@ -127,12 +122,22 @@ typedef struct iterator_struct {
     uint16_t nonce;
 } iterator_t;
 
-// Shared functions and data structures
+// Shared functions and variables
 
 extern MDB_env *dbenv;
 extern MDB_dbi dbi;
-int init_lmdb();
+
+static inline int max(int a, int b) { return a > b ? a : b; }
+static inline int min(int a, int b) { return a < b ? a : b; }
+
+static inline int compare_keys(uint16_t key1_size, const char *key1, uint16_t key2_size, const char *key2) {
+    int res = memcmp(key1, key2, min(key1_size, key2_size));
+    if (res == 0) res = (int)key1_size - (int)key2_size;
+    return res;
+}
+
+int init_lmdb(const char *db_dir);
 int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse);
 uint64_t checksum(const char *data, size_t len, uint64_t val);
 
-#endif // LOWLEVEL_INTERNAL_H
+#endif // OLMDB_COMMON_H

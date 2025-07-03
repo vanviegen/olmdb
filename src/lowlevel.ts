@@ -3,11 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const BIN_DIR = process.env.OLMDB_BIN_DIR || path.resolve(`${path.dirname(fileURLToPath(import.meta.url))}/../build/release/`);
 
 const lowlevel = {} as any;
-dlopen({exports: lowlevel}, `${__dirname}/../build/Release/olmdb_lowlevel.node`, os.constants.dlopen.RTLD_NOW);
+dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.dlopen.RTLD_NOW);
 
 /**
  * Initializes the database system with the specified directory.
@@ -17,12 +16,17 @@ dlopen({exports: lowlevel}, `${__dirname}/../build/Release/olmdb_lowlevel.node`,
  *   whether the commit succeeded.
  * @param directory Optional path to the database directory. If not provided,
  *   defaults to the OLMDB_DIR environment variable or "./.olmdb".
+ * @param commitWorkerBin Path to the commit worker binary. Defaults to
+ *  `<base_dir>/build/release/commit_worker`.
  * @throws DatabaseError if initialization fails
  */
-export const init = lowlevel.init as (
-  onCommit: (transactionId: number, success: boolean) => void, 
-  directory?: string
-) => void;
+export function init(
+  onCommit: (transactionId: number, success: boolean) => void,
+  directory?: string,
+  commitWorkerBin: string = `${BIN_DIR}/commit_worker`
+): void {
+  lowlevel.init(onCommit, directory, commitWorkerBin);
+}
 
 /**
  * Starts a new transaction for database operations.

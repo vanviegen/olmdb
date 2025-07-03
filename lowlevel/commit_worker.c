@@ -1,4 +1,4 @@
-#include "lowlevel_internal.h"
+#include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,10 +14,27 @@
 #define MAX_BATCHED_COMMITS 1024 // Maximum number of ltxn that we retry to process in a single wtxn
 #define MAX_CLIENTS 254 // Maximum number of processes that may open the database at once (higher than MAX_RTXNS has no use)
 
+#define LOG(fmt, ...) \
+    do { \
+        if (log_fd >= 0) { \
+            dprintf(log_fd, fmt "\n", ##__VA_ARGS__); \
+        } \
+    } while (0)
+
+#define SET_ERROR(code_str, msg, ...) \
+    do { \
+        LOG("[" code_str "] " msg, ##__VA_ARGS__); \
+    } while(0)
+
+// Translate Pointer, from JS process address space to our address space
+#define TP(ptr) (ptr ? (typeof(ptr))((uintptr_t)(ptr) + shared_memory_displacement): NULL)
+
+
 typedef struct {
     void *shared_memory;
     uintptr_t shared_memory_displacement; // Where our mapping is located relative to the main thread mapping
     size_t shared_memory_size;
+    uint32_t pid;
     uint8_t waiting_for_signal;
 } client_t;
 
@@ -32,55 +49,39 @@ static queued_commit_t queued_commits[MAX_BATCHED_COMMITS];
 static int queued_commit_count = 0;
 
 static int epoll_fd = -1;
-int log_fd = -1; // -1 for stderr (with LMDB prefix), -2 for no logging, something else for a log file (without LMDB prefix)
+int log_fd = -1; // 
 
 static void perform_queued_commits();
 static void handle_client_command(int client_fd);
 
-// Translate Pointer, from JS process address space to our address space
-#define TP(ptr) ((typeof(ptr))((uintptr_t)(ptr) + shared_memory_displacement))
 
-int start_commit_worker(int socket_fd, const char *db_dir) {
-    // We're daemonizing!
-    
-    fflush(NULL); // Flush all stdio buffers before forking
-    pid_t pid = fork();
-    if (pid < 0) {
-        LOG_INTERNAL_ERROR("Failed to fork server process: %s", strerror(errno));
-        return -1;
-    }
-    if (pid > 0) {
-        // Parent process exits, leaving the child as the server
-        return 0;
-    }
+// We must include this instead of linking it, because of the error handling and logging macros
+#include "common.c"
 
-    // Close all file descriptors except the socket
-    for (int fd = 0; fd < 1024; fd++) {
-        if (fd != socket_fd) {
-            close(fd);
-        }
-    }
 
-    // Create a new session and detach from terminal
+int main(int argc, const char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "This program should only be invoked by the lowlevel OLMDB module.\n");
+        return 1;
+    }
+    const int socket_fd = 0; // File descriptor for the socket, passed by the main process
+    const char *db_dir = argv[1];
+
+    // Daemonize
     setsid(); 
+    if (fork() > 0) _exit(0);
 
-    // Fork again, just to be sure :-)
-    pid = fork();
-    if (pid > 0) {
-        _exit(0); // Parent exits (without running atexit handlers), leaving the child as the server
-    }
+    // Start listening (so clients don't get connection refused while we're starting up)
+    listen(socket_fd, SOMAXCONN);
 
+    // Set up logging
     char log_path[PATH_MAX];
     char *after = stpncpy(log_path, db_dir, sizeof(log_path) - 1);
     strncat(after, "/commit_worker.log", log_path + sizeof(log_path) - after - 1);
-
     log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (log_fd < 0) log_fd = -2; // Don't log
 
     // Recreate dbenv for our new process
-    init_lmdb();
-
-    listen(socket_fd, SOMAXCONN);
+    if (init_lmdb(db_dir) < 0) return 1;
 
     // Setup epoll
     epoll_fd = epoll_create1(0);
@@ -100,7 +101,7 @@ int start_commit_worker(int socket_fd, const char *db_dir) {
         }
     }
 
-    LOG("Server started successfully");
+    LOG("Commit worker started");
 
     // Run the server loop
     while (1) {
@@ -118,10 +119,8 @@ int start_commit_worker(int socket_fd, const char *db_dir) {
         }
 
         struct epoll_event events[8];
-        LOG("Waiting for epoll events with timeout %d ms", timeout);
         int nfds = epoll_wait(epoll_fd, events, 8, timeout);
 
-        LOG("Epoll returned %d events errno=%d", nfds, errno);
         if (nfds < 0) {
             if (errno == EINTR) continue; // Interrupted, retry
             LOG_INTERNAL_ERROR("Failed to wait for epoll events: %s", strerror(errno));
@@ -220,18 +219,15 @@ static void handle_client_command(int client_fd) {
             // Try again later
             return;
         }
-        if (n < 0) LOG_INTERNAL_ERROR("Failed to receive data from client %d: %s", client_fd, strerror(errno));
-        else LOG("Client %d disconnected", client_fd);
-        close(client_fd); // This will deregister from epoll
+        if (n < 0) LOG_INTERNAL_ERROR("Failed to receive data from client fd=%d pid=%d: %s", client_fd, client->pid, strerror(errno));
+        else if (client->pid) LOG("Client pid=%d disconnected", client->pid);
+        close(client_fd); // This will also deregister from epoll
         if (client->shared_memory) {
             munmap(client->shared_memory, client->shared_memory_size);
-            client->shared_memory = NULL;
-            client->shared_memory_size = 0;
+            memset(client, 0, sizeof(client_t)); // Reset client state
         }
         return;
     }
-
-    LOG("Received %zd bytes from client %d command %c", n, client_fd, buffer[0]);
 
     if (n==sizeof(init_command_t) && buffer[0]=='i') { // The shared memory file descriptor
         init_command_t *init_cmd = (init_command_t *)buffer;
@@ -251,12 +247,13 @@ static void handle_client_command(int client_fd) {
         client->shared_memory = mem;
         client->shared_memory_size = init_cmd->mmap_size;
         client->shared_memory_displacement = (uintptr_t)mem - (uintptr_t)init_cmd->mmap_ptr;
-        LOG("Client %d initialized shared memory with size %lu and displacement %p", client_fd, client->shared_memory_size, (void *)client->shared_memory_displacement);
+        client->pid = init_cmd->pid;
+        LOG("Client pid=%d initialized", client->pid);
         return;
     }
 
     if (!client->shared_memory) {
-        LOG_INTERNAL_ERROR("Client %d has no shared memory mapped", client_fd);
+        LOG_INTERNAL_ERROR("Client fd=%d does command=%c len=%d before init", client_fd, buffer[0], n);
         close(client_fd);
         return;
     }
@@ -277,7 +274,7 @@ static void handle_client_command(int client_fd) {
         return;
     }
 
-    LOG_INTERNAL_ERROR("Received unexpected data from client %d: len=%d type=%c", client_fd, (int)n, buffer[0]);
+    LOG_INTERNAL_ERROR("Unexpected data from client pid=%d: len=%d type=%c", client->pid, (int)n, buffer[0]);
 }
 
 static void error_shutdown() {
@@ -402,14 +399,18 @@ static void perform_queued_commits() {
         error_shutdown();
     }
 
+    LOG("Processing %d queued commits\n", queued_commit_count);
+
     // Process all queued ltxns
     for(int i=0; i<queued_commit_count; i++) {
-        int client_fd = queued_commits[i].client_fd;
-        uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
         ltxn_t *ltxn = queued_commits[i].ltxn;
 
         if (ltxn->state == TRANSACTION_COMMITTING) {
+            int client_fd = queued_commits[i].client_fd;
+            uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
+            LOG("Processing ltxn %p for client pid=%d", ltxn, clients[client_fd].pid);
             if (validate_reads(wtxn, ltxn, shared_memory_displacement, validation_cursor)) {
+                LOG("Committing ltxn %p for client pid=%d\n", ltxn, clients[client_fd].pid);
                 perform_updates(wtxn, ltxn, shared_memory_displacement);
             } else {
                 ltxn->state = TRANSACTION_RACED;
@@ -440,8 +441,6 @@ static void perform_queued_commits() {
         int client_fd = queued_commits[i].client_fd;
         uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
         ltxn_t *ltxn = queued_commits[i].ltxn;
-
-        fprintf(stderr, "Notifying client %d of commit completion of transaction with status %d\n", queued_commits[i].client_fd, ltxn->state);
 
         // int client_fd = queued_commits[i].client_fd;
         if (clients[client_fd].waiting_for_signal) {

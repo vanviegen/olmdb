@@ -1,4 +1,4 @@
-#include "lowlevel.h"
+#include "transaction_client.h"
 #include <node_api.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,11 +12,6 @@ static napi_env global_env = NULL;
 
 // libuv poll handle for fd events
 static uv_poll_t* poll_handle = NULL;
-
-// Helper for handling arraybuffer parameters
-static napi_status get_arraybuffer_info(napi_env env, napi_value value, void** data, size_t* size) {
-    return napi_get_arraybuffer_info(env, value, data, size);
-}
 
 // Helper to create and throw a DatabaseError
 static void throw_database_error(napi_env env) {
@@ -182,44 +177,50 @@ static napi_value create_database_error_class(napi_env env) {
 
 // NAPI wrapper functions
 napi_value js_init(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value argv[2];
-    char *db_dir = NULL;
-    char db_dir_buffer[512];
-    
-    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1) {
-        napi_throw_type_error(env, NULL, "Expected onCommit callback function and optional database path");
+    size_t argc = 3;
+    napi_value argv[3];    
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 3) {
+        napi_throw_type_error(env, NULL, "Three arguments expected");
         return NULL;
     }
-    
-    // Check that first argument is a function
+
+    // Second argument should be a function callback, which we'll store
     napi_valuetype arg_type;
     if (napi_typeof(env, argv[0], &arg_type) != napi_ok || arg_type != napi_function) {
-        napi_throw_type_error(env, NULL, "Expected first argument to be an onCommit callback function");
+        napi_throw_type_error(env, NULL, "Callback argument is not a function");
         return NULL;
     }
-    
-    // Store callback reference
     if (on_commit_callback_ref) napi_delete_reference(env, on_commit_callback_ref);
     if (napi_create_reference(env, argv[0], 1, &on_commit_callback_ref) != napi_ok) {
         napi_throw_error(env, NULL, "Failed to store callback reference");
         return NULL;
     }
-    
-    global_env = env;
-    
+
     // Get optional database directory
-    if (argc >= 2) {
-        if (napi_get_value_string_utf8(env, argv[1], db_dir_buffer, sizeof(db_dir_buffer), NULL) != napi_ok) {
-            napi_throw_type_error(env, NULL, "Database path must be a string");
-            return NULL;
+    char db_dir[PATH_MAX];
+    db_dir[0] = 0;
+    fprintf(stderr, "Database directory: %s\n", db_dir);
+    if (napi_get_value_string_utf8(env, argv[1], db_dir, sizeof(db_dir), NULL) != napi_ok) {
+        if (napi_typeof(env, argv[1], &arg_type) != napi_ok || (arg_type != napi_undefined && arg_type != napi_null)) {
+            napi_throw_type_error(env, NULL, "Database path must be a string or undefined");
         }
-        db_dir = db_dir_buffer;
+        return NULL;
     }
-    
+    fprintf(stderr, "Database directory: %s\n", db_dir);
+
+    // Get commit worker binary path
+    char commit_worker_bin[PATH_MAX];
+    if (napi_get_value_string_utf8(env, argv[2], commit_worker_bin, sizeof(commit_worker_bin), NULL) != napi_ok) {
+        napi_throw_type_error(env, NULL, "Commit worker binary path must be a string");
+        return NULL;
+    }
+    fprintf(stderr, "Commit worker binary: %s\n", commit_worker_bin);
+            
+    global_env = env;
+
     // Call C API
-    int result = init(db_dir, setup_signal_fd);
-    
+    int result = init(db_dir[0] ? db_dir : NULL, commit_worker_bin, setup_signal_fd);
+
     if (result < 0) {
         throw_database_error(env);
         return NULL;
@@ -304,7 +305,7 @@ napi_value js_get(napi_env env, napi_callback_info info) {
     // Get key buffer
     void *key_data;
     size_t key_size;
-    if (get_arraybuffer_info(env, argv[1], &key_data, &key_size) != napi_ok) {
+    if (napi_get_arraybuffer_info(env, argv[1], &key_data, &key_size) != napi_ok) {
         napi_throw_type_error(env, NULL, "Expected key as ArrayBuffer");
         return NULL;
     }
@@ -345,8 +346,8 @@ napi_value js_put(napi_env env, napi_callback_info info) {
     // Get key and value buffers
     void *key_data, *value_data;
     size_t key_size, value_size;
-    if (get_arraybuffer_info(env, argv[1], &key_data, &key_size) != napi_ok ||
-        get_arraybuffer_info(env, argv[2], &value_data, &value_size) != napi_ok) {
+    if (napi_get_arraybuffer_info(env, argv[1], &key_data, &key_size) != napi_ok ||
+        napi_get_arraybuffer_info(env, argv[2], &value_data, &value_size) != napi_ok) {
         napi_throw_type_error(env, NULL, "Expected key and value as ArrayBuffers");
         return NULL;
     }
@@ -378,7 +379,7 @@ napi_value js_del(napi_env env, napi_callback_info info) {
     // Get key buffer
     void *key_data;
     size_t key_size;
-    if (get_arraybuffer_info(env, argv[1], &key_data, &key_size) != napi_ok) {
+    if (napi_get_arraybuffer_info(env, argv[1], &key_data, &key_size) != napi_ok) {
         napi_throw_type_error(env, NULL, "Expected key as ArrayBuffer");
         return NULL;
     }
@@ -416,7 +417,7 @@ napi_value js_create_iterator(napi_env env, napi_callback_info info) {
     // Start key (optional)
     if (argc >= 2 && napi_typeof(env, argv[1], &key_type) == napi_ok && 
         key_type != napi_null && key_type != napi_undefined) {
-        if (get_arraybuffer_info(env, argv[1], &start_key_data, &start_key_size) != napi_ok) {
+        if (napi_get_arraybuffer_info(env, argv[1], &start_key_data, &start_key_size) != napi_ok) {
             napi_throw_type_error(env, NULL, "Start key must be an ArrayBuffer");
             return NULL;
         }
@@ -425,7 +426,7 @@ napi_value js_create_iterator(napi_env env, napi_callback_info info) {
     // End key (optional)
     if (argc >= 3 && napi_typeof(env, argv[2], &key_type) == napi_ok && 
         key_type != napi_null && key_type != napi_undefined) {
-        if (get_arraybuffer_info(env, argv[2], &end_key_data, &end_key_size) != napi_ok) {
+        if (napi_get_arraybuffer_info(env, argv[2], &end_key_data, &end_key_size) != napi_ok) {
             napi_throw_type_error(env, NULL, "End key must be an ArrayBuffer");
             return NULL;
         }

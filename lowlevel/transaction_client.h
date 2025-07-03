@@ -1,9 +1,9 @@
-#ifndef OLMDB_LOWLEVEL_H
-#define OLMDB_LOWLEVEL_H
+#ifndef TRANSACTION_CLIENT_H
+#define TRANSACTION_CLIENT_H
 
 #include <stdint.h>
 #include <stddef.h>
-#include "lowlevel.h"
+#include "common.h"
 
 /**
  * @struct commit_result_t
@@ -20,7 +20,8 @@ typedef struct {
 /**
  * @brief Initialize the database with the specified directory.
  *
- * @param db_dir Path to the database directory, or NULL to use environment variable OLMDB_DIR or default "./.olmdb".
+ * @param db_dir Path to the database directory, or NULL to use environment variable OLMDB_DIR or default "./.olmdb". Data from this pointer will be copied.
+ * @param commit_worker_bin Path to the commit worker binary. Usually `<base_dir>/build/release/commit_worker`. Data from this pointer will be copied.
  * @param set_signal_fd Optional callback function to set and change the file descriptor for the commit worker connection.
  *   When data becomes available on this file descriptor, that's a signal that get_commit_results() should be called.
  * 
@@ -31,10 +32,10 @@ typedef struct {
  * @error DIR_TOO_LONG       Database directory path exceeds maximum length.
  * @error CREATE_DIR_FAILED  Failed to create or open database directory.
  * @error OOM                Failed to allocate shared memory.
- * @error NO_SERVER          Failed to connect to commit worker after multiple attempts (see log file in db dir).
+ * @error NO_COMMIT_WORKER          Failed to connect to commit worker after multiple attempts (see log file in db dir).
  * @error LMDB*              Various LMDB errors (where * is the negative LMDB error code).
  */
-int init(const char *db_dir, void (*set_signal_fd)(int fd));
+int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_fd)(int fd));
 
 /**
  * @brief Start a new transaction.
@@ -220,18 +221,4 @@ extern char error_message[2048];
  */
 extern char error_code[32];
 
-/**
- * @brief Helper macro for setting error code and message.
- *
- * @param code_str   Error code string.
- * @param msg        Error message format string.
- * @param ...        Format arguments.
- */
-#define SET_ERROR(code_str, msg, ...) \
-    do { \
-        snprintf(error_message, sizeof(error_message), msg, ##__VA_ARGS__); \
-        strncpy(error_code, code_str, sizeof(error_code) - 1); \
-        error_code[sizeof(error_code) - 1] = '\0'; \
-    } while(0)
-
-#endif // OLMDB_LOWLEVEL_H
+#endif // TRANSACTION_CLIENT_H

@@ -20,6 +20,7 @@
   ],
   "scripts": {
     "build": "rm -rf dist/*. ; tsc",
+    "prepare": "tools/build.sh",
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",
     "test:node": "jest --verbose",

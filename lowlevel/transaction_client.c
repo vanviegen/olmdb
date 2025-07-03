@@ -1,22 +1,23 @@
 /**
  * See the architecture section in README.md before delving into this code.
  */
+
 #define _GNU_SOURCE // For memfd_create
-#include <sys/mman.h>
-#include "commit_worker.c"
-#include "lowlevel_internal.h"
-#include "lowlevel.h"
 #include <assert.h>
 #include <errno.h>
+#include <linux/limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/mman.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -26,7 +27,10 @@
 #else
     #include <sys/time.h>
 #endif
-#include <linux/limits.h>
+
+#include "common.h"
+#include "transaction_client.h"
+
 
 // Configuration constants
 #define SHARED_MEMORY_SIZE (4ULL * 1024 * 1024 * 1024) // 4 GB shared memory size
@@ -37,18 +41,31 @@
 #define SKIPLIST_DEPTH 4
 #define MAX_RTXNS 254
 
+// Macro's
+
+// Get the pointer to a struct from a pointer to one of its members
+#define CONTAINER_OF(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+
+#define LOG(fmt, ...) \
+    do { \
+        dprintf(2, "OLMDB: " fmt "\n", ##__VA_ARGS__); \
+    } while (0)
+
+#define SET_ERROR(code_str, msg, ...) \
+    do { \
+        snprintf(error_message, sizeof(error_message), msg, ##__VA_ARGS__); \
+        snprintf(error_code, sizeof(error_code), "%s", code_str); \
+    } while(0)
+
+
+// We must include this instead of linking it, because of the error handling and logging macros
+#include "common.c"
+
+
 // Global state
 
-// Error state
-char error_message[2048];
-char error_code[32];
-
-// LMDB environment, also used (after a fresh init) by commit_worker.c
-MDB_env *dbenv = NULL;
-MDB_dbi dbi;
-
 // Transactions
-static ltxn_t ltxns[MAX_LTXNS]; // This is quite large, but Linux will allocate pages lazily
+static ltxn_t *ltxns; // This will be allocated within shared memory
 static ltxn_t *first_free_ltxn = NULL; // Start of linked-list of free transactions
 static int next_unused_ltxn = 0; // Index of next never-used transaction
 static ltxn_t *ltxn_commit_queue_head = NULL; // List of ltxns handed to the commit worker for processing
@@ -78,7 +95,7 @@ static char *shared_memory_unused_end;
 static int commit_worker_fd = -1;
 static int mmap_fd = -1;
 char db_dir[PATH_MAX];
-
+char *commit_worker_bin;
 void (*set_signal_fd_callback)(int fd) = NULL;
 
 // Prototypes for internal functions
@@ -91,27 +108,11 @@ static update_log_t *find_update_log(ltxn_t *ltxn, uint16_t key_size, const char
 static void delete_update_log(ltxn_t *ltxn, update_log_t *log);
 static uint32_t get_random_number();
 
-// Macro's
-
-#define SET_LMDB_ERROR(msg, rc, ...) \
-    do { \
-        snprintf(error_message, sizeof(error_message), "LMDB " msg " failed (%s)", ##__VA_ARGS__, mdb_strerror(rc)); \
-        snprintf(error_code, sizeof(error_code), "LMDB%d", rc); \
-    } while(0)
-
-// Get the pointer to a struct from a pointer to one of its members
-#define CONTAINER_OF(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+// Error state
+char error_message[2048];
+char error_code[32];
 
 // Inline functions
-
-static inline int max(int a, int b) { return a > b ? a : b; }
-static inline int min(int a, int b) { return a < b ? a : b; }
-
-static inline int compare_keys(uint16_t key1_size, const char *key1, uint16_t key2_size, const char *key2) {
-    int res = memcmp(key1, key2, min(key1_size, key2_size));
-    if (res == 0) res = (int)key1_size - (int)key2_size;
-    return res;
-}
 
 static int ltxn_to_id(ltxn_t *ltxn) {
     int idx = ltxn - ltxns;
@@ -125,18 +126,6 @@ static uint32_t get_random_number() {
     rng_state ^= rng_state >> 7;
     rng_state ^= rng_state << 17;
     return (uint32_t)rng_state;
-}
-
-// A simple and very fast hash function for checksums
-uint64_t checksum(const char *data, size_t len, uint64_t val) {
-    if (!data) return 0;
-    val ^= len;
-    val *= CHECKSUM_PRIME;
-    for (size_t i = 0; i < len; i++) {
-        val ^= (uint8_t)data[i];
-        val *= CHECKSUM_PRIME;
-    }
-    return val;
 }
 
 static long long get_time_ms() {
@@ -558,33 +547,6 @@ static void delete_update_log(ltxn_t *ltxn, update_log_t *log) {
     }
 }
 
-int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse) {
-    MDB_val in_key;
-    memcpy(&in_key, key, sizeof(MDB_val));
-    
-    int cursor_mode = in_key.mv_size > 0 ? MDB_SET_RANGE : (reverse ? MDB_LAST : MDB_FIRST);
-    int rc = mdb_cursor_get(cursor, key, value, cursor_mode);
-    
-    if (in_key.mv_size > 0 && reverse) {
-        if (rc == MDB_NOTFOUND) {
-            // If no next item was found, then the key we're looking for is the last item in the database
-            rc = mdb_cursor_get(cursor, key, value, MDB_LAST);
-        } else if (rc == 0 && compare_keys(key->mv_size, key->mv_data, in_key.mv_size, in_key.mv_data) != 0) {
-            // If the key is not exactly matched, we need to move the cursor to the item that came *before*
-            rc = mdb_cursor_get(cursor, key, value, MDB_PREV);            
-        }
-    }
-    
-    if (rc == MDB_NOTFOUND) {
-        key->mv_data = NULL; // mark cursor as at the end of the database
-        key->mv_size = 0;
-        value->mv_data = NULL;
-        value->mv_size = 0; 
-        rc = 0; // This is not an error, just means no more items to read
-    }
-    return rc;
-}
-
 int send_fd(int sockfd, int fd)
 {
     /* Allocate a char array of suitable size to hold the ancillary data.
@@ -644,11 +606,39 @@ int send_fd(int sockfd, int fd)
     return 0;
 }
 
+static void start_commit_worker(int socket_fd, const char *db_dir) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        LOG_INTERNAL_ERROR("Failed to fork server process: %s", strerror(errno));
+        return;
+    }
+    if (pid > 0) return; // Parent process, return immediately
+
+    // Close all file descriptors except the socket
+    for (int fd = 0; fd < 1024; fd++) {
+        if (fd != socket_fd) {
+            close(fd);
+        }
+    }
+    
+    if (socket_fd != 0) {
+        // We'll pass the socket to the commit worker as stdin
+        dup2(socket_fd, 0);
+        close(socket_fd);
+    }
+
+    execv(commit_worker_bin, (char *[]){"commit_worker", (char *)db_dir, NULL});
+    // If execv fails, log the error and exit
+    LOG_INTERNAL_ERROR("Failed to exec commit worker: %s", strerror(errno));
+    _exit(1);
+}
+
 static int connect_to_commit_worker() {
+    LOG("Connecting to commit worker...");
     for(int retry_count = 0; retry_count < 10; retry_count++) {
         int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
         if (fd == -1) {
-            SET_ERROR("NO_SERVER", "Failed to create socket: %s", strerror(errno));
+            SET_ERROR("NO_COMMIT_WORKER", "Failed to create socket: %s", strerror(errno));
             return -1;
         }
         
@@ -665,7 +655,7 @@ static int connect_to_commit_worker() {
         // First try to bind, see if we can become the server
         if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
             start_commit_worker(fd, db_dir);
-            usleep(10000); // 10ms to allow the server to start (otherwise the retry will come to the rescue)
+            usleep(50000); // 50ms to allow the server to start (if that's not enough the retry will come to the rescue)
             close(fd);
             continue; // Now try to connect to the server
         } else if (errno != EADDRINUSE) {
@@ -676,7 +666,7 @@ static int connect_to_commit_worker() {
         
         // Try to become client instead
         if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
-            LOG_INTERNAL_ERROR("Failed to connect to server socket '%s': %s", addr.sun_path, strerror(errno));
+            LOG_INTERNAL_ERROR("Failed to connect to worker socket: %s", strerror(errno));
             goto delayed_retry_connect;
         }
 
@@ -684,6 +674,7 @@ static int connect_to_commit_worker() {
             .type = 'i',
             .mmap_ptr = (uintptr_t)shared_memory,
             .mmap_size = SHARED_MEMORY_SIZE,
+            .pid = getpid(),
         };
 
         if (send(fd, &init_command, sizeof(init_command), 0) < 0) {
@@ -695,13 +686,14 @@ static int connect_to_commit_worker() {
             goto delayed_retry_connect;
         }
 
+        LOG("Connected to commit worker");
         return fd;
     delayed_retry_connect:
         close(fd);
-        usleep(10000 + (get_random_number()%40000)); // 10ms ~ 50ms before trying again
+        usleep(50000 + (get_random_number()%150000)); // 50ms ~ 200ms before trying again
     }
 
-    SET_ERROR("NO_SERVER", "Failed to connect to commit worker after multiple attempts");
+    SET_ERROR("NO_COMMIT_WORKER", "Failed to connect to commit worker after multiple attempts");
     return -1;
 }
 
@@ -721,7 +713,13 @@ void reconnect_commit_worker() {
     commit_worker_fd = connect_to_commit_worker();
 }
 
-int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
+static void await_children(int signal) {
+    while (waitpid((pid_t) (-1), 0, WNOHANG) > 0) {
+        fprintf(stderr, "Child process reaped\n");
+    }
+}
+
+int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_fd)(int fd)) {
     if (dbenv) {
         SET_ERROR("DUP_INIT", "Database is already init");
         return -1;
@@ -746,14 +744,19 @@ int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
         strncpy(db_dir, _db_dir, sizeof(db_dir) - 1);
         db_dir[sizeof(db_dir) - 1] = '\0'; // Ensure null termination
     }
-    
+
     // Create database directory if it doesn't exist
     if (mkdir(db_dir, 0755) != 0 && errno != EEXIST) {
         SET_ERROR("CREATE_DIR_FAILED", "Failed to create/open database directory '%.512s': %s", db_dir, strerror(errno));
         return -1;
     }
 
-    if (init_lmdb() < 0) return -1; // Error already set
+    if (access(_commit_worker_bin, X_OK) != 0) {
+        SET_ERROR("NO_COMMIT_WORKER", "Commit worker binary '%s' is not executable: %s", _commit_worker_bin, strerror(errno));
+        return -1;
+    }
+
+    if (init_lmdb(db_dir) < 0) return -1; // Error already set
 
     mmap_fd = memfd_create("client_shared_mem", 0);
     if (mmap_fd < 0) {
@@ -774,8 +777,15 @@ int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
     }
 
     shared_memory_unused_start = shared_memory;
-    shared_memory_unused_end = shared_memory + SHARED_MEMORY_SIZE;
 
+    // Allocate ltxns at the end of the shared memory
+    ltxns = (ltxn_t *)((uintptr_t)(shared_memory + SHARED_MEMORY_SIZE - sizeof(ltxn_t) * MAX_LTXNS) & ~4095); // Align to 4kb
+    shared_memory_unused_end = (char *)ltxns;
+
+    // Setup signal to await exiting children
+    signal(SIGCHLD, await_children);
+
+    commit_worker_bin = strdup(_commit_worker_bin);
     commit_worker_fd = connect_to_commit_worker();
     if (commit_worker_fd < 0) return -1; // Error already set
 
@@ -783,68 +793,6 @@ int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
         set_signal_fd_callback(commit_worker_fd);
     }
 
-    return 0;
-}
-
-int init_lmdb() {
-    // Initialize LMDB environment
-    int rc = mdb_env_create(&dbenv);
-    if (rc != MDB_SUCCESS) {
-        SET_LMDB_ERROR("env create", rc);
-        return -1;
-    }
-    
-    rc = mdb_env_set_mapsize(dbenv, 16ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL); // 16TB
-    if (rc != MDB_SUCCESS) {
-        mdb_env_close(dbenv);
-        dbenv = NULL;
-        SET_LMDB_ERROR("set map size", rc);
-        return -1;
-    }
-    
-    rc = mdb_env_set_maxreaders(dbenv, MAX_LTXNS);
-    if (rc != MDB_SUCCESS) {
-        mdb_env_close(dbenv);
-        dbenv = NULL;
-        SET_LMDB_ERROR("set max readers", rc);
-        return -1;
-    }
-    
-    rc = mdb_env_open(dbenv, db_dir, MDB_NOTLS, 0664);
-    if (rc != MDB_SUCCESS) {
-        mdb_env_close(dbenv);
-        dbenv = NULL;
-        SET_LMDB_ERROR("env init", rc);
-        return -1;
-    }
-    
-    // Open the database (within a transaction)
-    MDB_txn *wtxn;
-    rc = mdb_txn_begin(dbenv, NULL, 0, &wtxn);
-    if (rc != MDB_SUCCESS) {
-        mdb_env_close(dbenv);
-        dbenv = NULL;
-        SET_LMDB_ERROR("dbi init txn begin", rc);
-        return -1;
-    }
-    
-    rc = mdb_dbi_open(wtxn, NULL, 0, &dbi);
-    if (rc != MDB_SUCCESS) {
-        mdb_txn_abort(wtxn);
-        mdb_env_close(dbenv);
-        dbenv = NULL;
-        SET_LMDB_ERROR("dbi init", rc);
-        return -1;
-    }
-    
-    rc = mdb_txn_commit(wtxn);
-    if (rc != MDB_SUCCESS) {
-        mdb_env_close(dbenv);
-        dbenv = NULL;
-        SET_LMDB_ERROR("dbi init txn commit", rc);
-        return -1;
-    }
-    
     return 0;
 }
 
@@ -1192,6 +1140,7 @@ int get_commit_results(commit_result_t *results, int max_results) {
     // In case our user doesn't use the commit worker fd to monitor for signals,
     // we need to drain it, to make sure it doesn't fill up and block the worker.
     // Also, we want to check if the fd is still valid (meaning the worker is still running).
+    fprintf(stderr, "get_commit_results\n");
     while (1) {
         char d;
         int rc = recv(commit_worker_fd, &d, 1, MSG_DONTWAIT);
@@ -1203,6 +1152,7 @@ int get_commit_results(commit_result_t *results, int max_results) {
             fprintf(stderr, "Data from commit worker: %c len=%d\n", d, rc);
             continue; // Data received
         }
+        fprintf(stderr, "Commit worker rc=%d errno=%d\n", rc, errno);
         // An error or EOF
         reconnect_commit_worker();
         break;
