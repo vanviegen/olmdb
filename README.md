@@ -10,6 +10,7 @@ OLMDB is a high-performance, embedded database that combines the speed and relia
 - 📦 **Zero Dependencies**: Minimal footprint, running on both Node and Bun.
 - 🔧 **Simple API**: Fully typed, fast synchronous database reads, promise-based commits.
 
+**Important caveat**: OLMDB (probably) only runs on Linux currently.
 
 ## Quick Demo
 ```typescript
@@ -276,239 +277,375 @@ The high-level API provides a promise-based, type-safe interface with automatic 
 
 The following is auto-generated from `src/olmdb.ts`:
 
-### Error Handling
+### get
 
-OLMDB uses a custom `DatabaseError` class that extends the standard JavaScript `Error` class. This provides structured error handling with specific error codes.
+Retrieves a value from the database by key within the current transaction.
 
-#### `DatabaseError`
+| Function | Type |
+| ---------- | ---------- |
+| `get` | `(key: Data) => Uint8Array<ArrayBufferLike> or undefined` |
+
+Parameters:
+
+* `key`: - The key to look up as a Uint8Array, ArrayBuffer, or string.
+
+
+### getBuffer
+
+Retrieves a value from the database by key within the current transaction.
+
+| Function | Type |
+| ---------- | ---------- |
+| `getBuffer` | `(key: Data) => ArrayBuffer or undefined` |
+
+Parameters:
+
+* `key`: - The key to look up as a Uint8Array, ArrayBuffer, or string.
+
+
+### getString
+
+Retrieves a value from the database by key within the current transaction and decodes it as a string.
+
+| Function | Type |
+| ---------- | ---------- |
+| `getString` | `(key: Data) => string or undefined` |
+
+Parameters:
+
+* `key`: - The key to look up as a Uint8Array, ArrayBuffer, or string.
+
+
+### put
+
+Stores a key-value pair in the database within the current transaction.
+
+| Function | Type |
+| ---------- | ---------- |
+| `put` | `(key: Data, val: Data) => void` |
+
+Parameters:
+
+* `key`: - The key to store as a Uint8Array, ArrayBuffer, or string.
+* `val`: - The value to associate with the key as a Uint8Array, ArrayBuffer, or string.
+
+
+### del
+
+Deletes a key-value pair from the database within the current transaction.
+
+| Function | Type |
+| ---------- | ---------- |
+| `del` | `(key: Data) => void` |
+
+Parameters:
+
+* `key`: - The key to delete as a Uint8Array, ArrayBuffer, or string.
+
+
+### init
+
+Initialize the database with the specified directory path.
+This function may only be called once. If it is not called before the first transact(),
+the database will be automatically initialized with the default directory.
+
+| Function | Type |
+| ---------- | ---------- |
+| `init` | `(dbDir?: string or undefined) => void` |
+
+Parameters:
+
+* `dbDir`: - Optional directory path for the database (defaults to environment variable $OLMDB_DIR or "./.olmdb").
+
+
+Examples:
+
 ```typescript
-class DatabaseError extends Error {
-  constructor(message: string, code?: string);
-  code?: string;
-}
+init("./my-database");
 ```
 
-**Example:**
-```typescript
-import { DatabaseError, init } from 'olmdb';
 
-try {
-  init('./database');
-  // Try to init again
-  init('./database');
-} catch (error) {
-  if (error instanceof DatabaseError && error.code === 'DUP_INIT') {
-    console.log('Database already initialized');
-  }
-}
-```
+### transact
 
-#### `TypeError`
-For basic API usage errors, such as invalid parameter counts or types, a `TypeError` is thrown. These types of errors generally don't benefit from a machine readable error `code`, as they can't be handled gracefully by code but just need to be fixed by the programmer.
+Executes a function within a database transaction context.
 
-```typescript
-import { init } from 'olmdb';
-init(123); // Throws TypeError("Expected database path as string")
-```
+All database operations (get, put, del) must be performed within a transaction.
+Transactions are automatically committed if the function completes successfully,
+or aborted if an error occurs. Failed transactions may be automatically retried
+up to 3 times in case of validation conflicts.
 
-### Database Management
+| Function | Type |
+| ---------- | ---------- |
+| `transact` | `<T>(fn: () => T) => Promise<T>` |
 
-#### `init(directory?)`
-Initialize the database with an optional directory path.
+Parameters:
+
+* `fn`: - The function to execute within the transaction context
+
+
+Examples:
 
 ```typescript
-import { init } from 'olmdb';
-
-// Use default directory (.olmdb or $OLMDB_DIR)
-init();
-
-// Use custom directory
-init('./my-database');
-```
-
-**Parameters:**
-- `directory` (optional): Database directory path
-
-**Throws:**
-- `DatabaseError` with code `DUP_INIT`: If database is already initialized
-- `DatabaseError` with code `CREATE_DIR_FAILED`: If directory creation fails
-- `DatabaseError` with code `LMDB-{code}`: For LMDB-specific errors
-
-### Transaction Management
-
-#### `transact<T>(fn: () => T): Promise<T>`
-Execute a function within a database transaction context with automatic retry on conflicts.
-
-```typescript
-import { transact, put, get } from 'olmdb';
-
 const result = await transact(() => {
-  put('key', 'value');
-  return get('key');
+  const value = get(keyBytes);
+  if (value) {
+    put(keyBytes, newValueBytes);
+  }
+  return value;
 });
 ```
 
-**Parameters:**
-- `fn`: Function to execute within transaction context
 
-**Returns:** Promise resolving to the function's return value
+### scan
 
-**Throws:**
-- `TypeError`: If nested transactions are attempted
-- `DatabaseError` with code `RACING_TRANSACTION`: If transaction fails after 3 retries due to conflicts (or errors)
-- `DatabaseError` with code `TXN_LIMIT`: If maximum number of transactions is reached
-- `DatabaseError` with code `LMDB-{code}`: For LMDB-specific errors
+Creates an iterator to scan through database entries within the current transaction.
 
-### Data Operations
+The iterator implements the standard TypeScript iterator protocol and can be used with for...of loops.
+Supports both forward and reverse iteration with optional start and end boundaries.
 
-All data operations must be performed within a `transact()` context.
+| Function | Type |
+| ---------- | ---------- |
+| `scan` | `<K = Uint8Array<ArrayBufferLike>, V = Uint8Array<ArrayBufferLike>>(opts?: ScanOptions<K, V>) => DbIterator<K, V>` |
 
-#### `get(key: Data): Uint8Array | undefined`
-Retrieve a value as a Uint8Array.
+Parameters:
 
-```typescript
-const value = get('my-key');
-if (value) {
-  console.log('Found:', value);
-}
-```
+* `opts`: - Configuration options for the scan operation.
+* `opts.start`: - Optional starting key for iteration. If not provided, starts from the beginning/end.
+* `opts.end`: - Optional ending key for iteration. Iteration stops before reaching this key.
+* `opts.reverse`: - Whether to iterate in reverse order (defaults to false).
+* `opts.keyConvert`: - Function to convert key ArrayBuffers to type K (defaults to asArray).
+* `opts.valueConvert`: - Function to convert value ArrayBuffers to type V (defaults to asArray).
 
-#### `getBuffer(key: Data): ArrayBuffer | undefined`
-Retrieve a value as an ArrayBuffer (zero-copy).
+
+Examples:
 
 ```typescript
-const buffer = getBuffer('my-key');
-if (buffer) {
-  console.log('Size:', buffer.byteLength);
-}
+await transact(() => {
+  // Iterate over all entries
+  for (const { key, value } of scan()) {
+    console.log('Key:', key, 'Value:', value);
+  }
+  
+  // Iterate with string conversion
+  for (const { key, value } of scan({ 
+    keyConvert: asString, 
+    valueConvert: asString 
+  })) {
+    console.log('Key:', key, 'Value:', value);
+  }
+  
+  // Iterate with boundaries
+  for (const { key, value } of scan({ 
+    start: "prefix_", 
+    end: "prefix~" 
+  })) {
+    console.log('Key:', key, 'Value:', value);
+  }
+  
+  // Manual iteration control
+  const iter = scan({ reverse: true });
+  const first = iter.next();
+  iter.close(); // Always close when done early
+});
 ```
 
-#### `getString(key: Data): string | undefined`
-Retrieve a value as a UTF-8 decoded string.
 
-```typescript
-const text = getString('my-key');
-if (text) {
-  console.log('Text:', text);
-}
-```
+### asArray
 
-#### `put(key: Data, value: Data): void`
-Store a key-value pair.
+Converts an ArrayBuffer to a Uint8Array.
+Helper function for use with scan() keyConvert and valueConvert options.
 
-```typescript
-put('string-key', 'string-value');
-put('buffer-key', new Uint8Array([1, 2, 3]));
-put('json-key', JSON.stringify({ data: 'value' }));
-```
+| Function | Type |
+| ---------- | ---------- |
+| `asArray` | `(buffer: ArrayBuffer) => Uint8Array<ArrayBufferLike>` |
 
-#### `del(key: Data): void`
-Delete a key-value pair.
+Parameters:
 
-```typescript
-del('unwanted-key');
-```
-
-**Common Parameters:**
-- `key`: Key as Uint8Array, ArrayBuffer, or string
-- `value`: Value as Uint8Array, ArrayBuffer, or string
-
-**Common Throws:**
-- `TypeError`: If called outside transaction context
-- `DatabaseError` with code `INVALID_TRANSACTION`: If transaction is invalid or closed
-- `DatabaseError` with code `KEY_TOO_LONG`: If key exceeds 511 bytes
-- `DatabaseError` with code `LMDB-{code}`: For LMDB-specific errors
-
-### Iteration
-
-#### `scan<K, V>(options?: ScanOptions<K, V>): DbIterator<K, V>`
-Create an iterator to scan through database entries.
-
-```typescript
-// Basic iteration
-for (const { key, value } of scan()) {
-  console.log('Entry:', key, value);
-}
-
-// With type conversion
-for (const { key, value } of scan({
-  keyConvert: asString,
-  valueConvert: asString
-})) {
-  console.log(`${key}: ${value}`);
-}
-
-// Range iteration
-for (const { key, value } of scan({
-  start: 'prefix:',
-  end: 'prefix;',
-  reverse: false
-})) {
-  console.log('Match:', key, value);
-}
-
-// Manual control
-const iterator = scan({ start: 'user:' });
-const first = iterator.next();
-if (!first.done) {
-  console.log('First:', first.value);
-}
-iterator.close(); // Clean up early
-```
-
-**ScanOptions:**
-- `start?: Data` - Starting key for iteration
-- `end?: Data` - Ending key for iteration (exclusive)
-- `reverse?: boolean` - Iterate in reverse order
-- `keyConvert?: (buffer: ArrayBuffer) => K` - Key conversion function
-- `valueConvert?: (buffer: ArrayBuffer) => V` - Value conversion function
-
-**Returns:** `DbIterator<K, V>` implementing standard iterator protocol
-
-#### `DbIterator<K, V>`
-Iterator class with standard TypeScript iterator protocol.
-
-**Methods:**
-- `next(): IteratorResult<DbEntry<K, V>>` - Get next entry
-- `close(): void` - Close iterator and free resources
-- `[Symbol.iterator](): DbIterator<K, V>` - Make iterable
-
-**Types:**
-- `DbEntry<K, V>`: `{ key: K, value: V }`
-
-### Type Conversion Helpers
-
-#### `asArray(buffer: ArrayBuffer): Uint8Array`
-Convert ArrayBuffer to Uint8Array.
-
-#### `asBuffer(buffer: ArrayBuffer): ArrayBuffer`
-Return ArrayBuffer as-is (identity function).
-
-#### `asString(buffer: ArrayBuffer): string`
-Convert ArrayBuffer to UTF-8 decoded string.
-
-```typescript
-// Usage with scan
-for (const { key, value } of scan({
-  keyConvert: asString,
-  valueConvert: asBuffer
-})) {
-  console.log(`Key: ${key}, Value size: ${value.byteLength}`);
-}
-```
-
-### Data Types
-
-#### `Data`
-Union type for keys and values: `Uint8Array | ArrayBuffer | string`
+* `buffer`: - The ArrayBuffer to convert.
 
 
+### asBuffer
+
+Returns the ArrayBuffer as-is.
+Helper function for use with scan() keyConvert and valueConvert options.
+
+| Function | Type |
+| ---------- | ---------- |
+| `asBuffer` | `(buffer: ArrayBuffer) => ArrayBuffer` |
+
+Parameters:
+
+* `buffer`: - The ArrayBuffer to return.
+
+
+### asString
+
+Converts an ArrayBuffer to a UTF-8 decoded string.
+Helper function for use with scan() keyConvert and valueConvert options.
+
+| Function | Type |
+| ---------- | ---------- |
+| `asString` | `(buffer: ArrayBuffer) => string` |
+
+Parameters:
+
+* `buffer`: - The ArrayBuffer to decode.
 ## Low-level API Reference
 
 The low-level API is what's exposed by the native module. It's a somewhat less convenient than the high-level API, but it's a good starting point if you require a different abstraction.
 
 The following is auto-generated from `src/lowlevel.ts`:
 
-## License
+### init
 
-ISC License - see LICENSE file for details.
+Initializes the database system with the specified directory.
+
+| Function | Type |
+| ---------- | ---------- |
+| `init` | `(onCommit: (transactionId: number, success: boolean) => void, directory?: string or undefined) => void` |
+
+Parameters:
+
+* `onCommit`: Callback function that will be invoked when an asynchronous 
+transaction commit completes. The callback receives the transaction ID and
+whether the commit succeeded.
+* `directory`: Optional path to the database directory. If not provided,
+defaults to the OLMDB_DIR environment variable or "./.olmdb".
+
+
+### startTransaction
+
+Starts a new transaction for database operations.
+
+| Function | Type |
+| ---------- | ---------- |
+| `startTransaction` | `() => number` |
+
+### commitTransaction
+
+Commits the transaction with the given ID.
+
+If the transaction is read-only, commit will complete immediately and return true.
+If the transaction has modifications, it will be queued for asynchronous commit and return false.
+When the commit is processed, the onCommit callback provided to init() will be invoked.
+
+| Function | Type |
+| ---------- | ---------- |
+| `commitTransaction` | `(transactionId: number) => boolean` |
+
+Parameters:
+
+* `transactionId`: The ID of the transaction to commit
+
+
+### abortTransaction
+
+Aborts the transaction with the given ID, discarding all changes.
+
+| Function | Type |
+| ---------- | ---------- |
+| `abortTransaction` | `(transactionId: number) => void` |
+
+Parameters:
+
+* `transactionId`: The ID of the transaction to abort
+
+
+### get
+
+Retrieves a value for the given key within a transaction.
+
+| Function | Type |
+| ---------- | ---------- |
+| `get` | `(transactionId: number, key: ArrayBufferLike) => ArrayBuffer or undefined` |
+
+Parameters:
+
+* `transactionId`: The ID of the transaction
+* `key`: Key to look up
+
+
+### put
+
+Stores a key-value pair within a transaction.
+
+| Function | Type |
+| ---------- | ---------- |
+| `put` | `(transactionId: number, key: ArrayBufferLike, value: ArrayBufferLike) => void` |
+
+Parameters:
+
+* `transactionId`: The ID of the transaction
+* `key`: Key to store
+* `value`: Value to store
+
+
+### del
+
+Deletes a key-value pair within a transaction.
+
+| Function | Type |
+| ---------- | ---------- |
+| `del` | `(transactionId: number, key: ArrayBufferLike) => void` |
+
+Parameters:
+
+* `transactionId`: The ID of the transaction
+* `key`: Key to delete
+
+
+### createIterator
+
+Creates an iterator for scanning a range of keys within a transaction.
+
+| Function | Type |
+| ---------- | ---------- |
+| `createIterator` | `(transactionId: number, startKey?: ArrayBufferLike or undefined, endKey?: ArrayBufferLike or undefined, reverse?: boolean or undefined) => number` |
+
+Parameters:
+
+* `transactionId`: The ID of the transaction
+* `startKey`: Optional key to start iteration from (inclusive)
+* `endKey`: Optional key to end iteration at (exclusive)
+* `reverse`: If true, keys are returned in descending order
+
+
+### readIterator
+
+Reads the next key-value pair from an iterator.
+
+| Function | Type |
+| ---------- | ---------- |
+| `readIterator` | `(iteratorId: number) => { key: ArrayBuffer; value: ArrayBuffer; } or undefined` |
+
+Parameters:
+
+* `iteratorId`: The ID of the iterator
+
+
+### closeIterator
+
+Closes an iterator when it's no longer needed.
+
+| Function | Type |
+| ---------- | ---------- |
+| `closeIterator` | `(iteratorId: number) => void` |
+
+Parameters:
+
+* `iteratorId`: The ID of the iterator to close
+
+
+### DatabaseError
+
+Interface for DatabaseError, which extends the standard Error class.
+Contains an additional code property for machine-readable error identification.
+The DatabaseError class is used to represent errors that occur during database operations.
+It extends the built-in Error class and has a machine readable error code string property.
+
+The lowlevel API will throw DatabaseError instances for all database-related errors.
+Invalid function arguments will throw TypeError.
+
+| Function | Type |
+| ---------- | ---------- |
+| `DatabaseError` | `DatabaseErrorConstructor` |

@@ -41,7 +41,9 @@ static void handle_client_command(int client_fd);
 #define TP(ptr) ((typeof(ptr))((uintptr_t)(ptr) + shared_memory_displacement))
 
 int start_commit_worker(int socket_fd, const char *db_dir) {
-    // We're daemonizing the server, so we need to fork
+    // We're daemonizing!
+    
+    fflush(NULL); // Flush all stdio buffers before forking
     pid_t pid = fork();
     if (pid < 0) {
         LOG_INTERNAL_ERROR("Failed to fork server process: %s", strerror(errno));
@@ -65,7 +67,7 @@ int start_commit_worker(int socket_fd, const char *db_dir) {
     // Fork again, just to be sure :-)
     pid = fork();
     if (pid > 0) {
-        exit(0); // Parent exits, leaving the child as the server
+        _exit(0); // Parent exits (without running atexit handlers), leaving the child as the server
     }
 
     char log_path[PATH_MAX];
@@ -116,8 +118,10 @@ int start_commit_worker(int socket_fd, const char *db_dir) {
         }
 
         struct epoll_event events[8];
+        LOG("Waiting for epoll events with timeout %d ms", timeout);
         int nfds = epoll_wait(epoll_fd, events, 8, timeout);
 
+        LOG("Epoll returned %d events errno=%d", nfds, errno);
         if (nfds < 0) {
             if (errno == EINTR) continue; // Interrupted, retry
             LOG_INTERNAL_ERROR("Failed to wait for epoll events: %s", strerror(errno));
@@ -131,7 +135,7 @@ int start_commit_worker(int socket_fd, const char *db_dir) {
             } else {
                 LOG("No connections for 10 seconds, shutting down commit worker");
                 if (dbenv) mdb_env_close(dbenv);
-                exit(0);
+                _exit(0); // Don't call atexit handlers, just exit
             }
             continue;
         }
@@ -159,7 +163,7 @@ int start_commit_worker(int socket_fd, const char *db_dir) {
                     close(client_fd);
                     continue;
                 }
-            } else if (events[i].data.fd >= MAX_CLIENTS) {
+            } else {
                 // Handle data on existing client connection
                 handle_client_command(events[i].data.fd);
             }
@@ -204,18 +208,20 @@ static int recv_fd(int socket_fd) {
 }
 
 static void handle_client_command(int client_fd) {
-    ASSERT_OR_RETURN(client_fd >= 0 && client_fd < MAX_CLIENTS, );
-    client_t *client = &clients[client_fd];
-    
     // Do a nonblocking recv
     char buffer[128];
     ssize_t n = recv(client_fd, buffer, sizeof(buffer), MSG_DONTWAIT);
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+
+    ASSERT_OR_RETURN(client_fd >= 0 && client_fd < MAX_CLIENTS, );
+    client_t *client = &clients[client_fd];
+
+    if (n <= 0) {
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             // Try again later
             return;
         }
-        LOG_INTERNAL_ERROR("Failed to receive data from client %d: %s", client_fd, strerror(errno));
+        if (n < 0) LOG_INTERNAL_ERROR("Failed to receive data from client %d: %s", client_fd, strerror(errno));
+        else LOG("Client %d disconnected", client_fd);
         close(client_fd); // This will deregister from epoll
         if (client->shared_memory) {
             munmap(client->shared_memory, client->shared_memory_size);
@@ -224,6 +230,8 @@ static void handle_client_command(int client_fd) {
         }
         return;
     }
+
+    LOG("Received %zd bytes from client %d command %c", n, client_fd, buffer[0]);
 
     if (n==sizeof(init_command_t) && buffer[0]=='i') { // The shared memory file descriptor
         init_command_t *init_cmd = (init_command_t *)buffer;
@@ -253,9 +261,11 @@ static void handle_client_command(int client_fd) {
         return;
     }
 
+    uintptr_t shared_memory_displacement = client->shared_memory_displacement;
+
     if (n==sizeof(commit_command_t) && buffer[0]=='c') { // A logical transaction to be committed
         commit_command_t *commit_command = (commit_command_t *)buffer;
-        queued_commits[queued_commit_count].ltxn = commit_command->ltxn;
+        queued_commits[queued_commit_count].ltxn = TP(commit_command->ltxn);
         queued_commits[queued_commit_count].client_fd = client_fd;
         queued_commit_count++;
         client->waiting_for_signal = 1;
@@ -274,7 +284,8 @@ static void error_shutdown() {
     // Let's hope a new worker will be started that is more successful
     LOG("Shutting down commit worker due to unexpected error");
     if (dbenv) mdb_env_close(dbenv);
-    exit(1);
+    // Underscore means atexit handlers (from libuv/node) should not be called
+    _exit(1);
 }
 
 // Validate that all read values haven't changed: returns TRANSACTION_*
@@ -395,7 +406,7 @@ static void perform_queued_commits() {
     for(int i=0; i<queued_commit_count; i++) {
         int client_fd = queued_commits[i].client_fd;
         uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
-        ltxn_t *ltxn = TP(queued_commits[i].ltxn);
+        ltxn_t *ltxn = queued_commits[i].ltxn;
 
         if (ltxn->state == TRANSACTION_COMMITTING) {
             if (validate_reads(wtxn, ltxn, shared_memory_displacement, validation_cursor)) {
@@ -417,7 +428,7 @@ static void perform_queued_commits() {
     for(int i=0; i<queued_commit_count; i++) {
         int client_fd = queued_commits[i].client_fd;
         uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
-        ltxn_t *ltxn = TP(queued_commits[i].ltxn);
+        ltxn_t *ltxn = queued_commits[i].ltxn;
         // If the transaction wasn't marked as raced, it has succeeded!
         if (ltxn->state == TRANSACTION_COMMITTING) {
             ltxn->state = TRANSACTION_SUCCEEDED; // Mark transaction as succeeded
@@ -427,6 +438,12 @@ static void perform_queued_commits() {
     // Notify all committing clients that their commits have been processed
     for(int i=0; i<queued_commit_count; i++) {
         int client_fd = queued_commits[i].client_fd;
+        uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
+        ltxn_t *ltxn = queued_commits[i].ltxn;
+
+        fprintf(stderr, "Notifying client %d of commit completion of transaction with status %d\n", queued_commits[i].client_fd, ltxn->state);
+
+        // int client_fd = queued_commits[i].client_fd;
         if (clients[client_fd].waiting_for_signal) {
             send(client_fd, "s", 1, 0); // Signal that one or multiple commits have been processed
             clients[client_fd].waiting_for_signal = 0;

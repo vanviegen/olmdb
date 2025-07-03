@@ -1,44 +1,13 @@
 import { dlopen } from "process";
 import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const lowlevel = {} as any;
-const mode = process.env.OLMDB_DEBUG ? "debug" : "release";
-dlopen({exports: lowlevel}, `${__dirname}/../dist/olmdb_lowlevel_${mode}.node`, os.constants.dlopen.RTLD_NOW);
-
-/**
- * Interface for DatabaseError, which extends the standard Error class.
- * Contains an additional code property for machine-readable error identification.
- */
-export interface DatabaseError extends Error {
-  /**
-   * A machine-readable string code identifying the type of error.
-   * Example codes include: "NOT_INIT", "INVALID_TRANSACTION", "KEY_TOO_LONG", etc.
-   */
-  code: string;
-}
-
-/**
- * Constructor interface for DatabaseError.
- */
-export interface DatabaseErrorConstructor {
-  /**
-   * Creates a new DatabaseError with the specified message and code.
-   * 
-   * @param message Human-readable error message
-   * @param code Machine-readable error code
-   */
-  new (message: string, code: string): DatabaseError;
-  prototype: DatabaseError;
-}
-
-/**
- * The DatabaseError class is used to represent errors that occur during database operations.
- * It extends the built-in Error class and has a machine readable error code string property.
- * 
- * The lowlevel API will throw DatabaseError instances for all database-related errors.
- * Invalid function arguments will throw TypeError.
- */
-export const DatabaseError = lowlevel.DatabaseError as DatabaseErrorConstructor;
+dlopen({exports: lowlevel}, `${__dirname}/../build/Release/olmdb_lowlevel.node`, os.constants.dlopen.RTLD_NOW);
 
 /**
  * Initializes the database system with the specified directory.
@@ -161,3 +130,38 @@ export const readIterator = lowlevel.readIterator as (
 export const closeIterator = lowlevel.closeIterator as (
   iteratorId: number
 ) => void;
+
+/**
+ * Interface for DatabaseError, which extends the standard Error class.
+ * Contains an additional code property for machine-readable error identification.
+ */
+export interface DatabaseError extends Error {
+  /**
+   * A machine-readable string code identifying the type of error.
+   * Example codes include: "NOT_INIT", "INVALID_TRANSACTION", "KEY_TOO_LONG", etc.
+   */
+  code: string;
+}
+
+/**
+ * Constructor interface for DatabaseError.
+ */
+export interface DatabaseErrorConstructor {
+  /**
+   * Creates a new DatabaseError with the specified message and code.
+   * 
+   * @param message Human-readable error message
+   * @param code Machine-readable error code
+   */
+  new (message: string, code: string): DatabaseError;
+  prototype: DatabaseError;
+}
+
+/**
+ * The DatabaseError class is used to represent errors that occur during database operations.
+ * It extends the built-in Error class and has a machine readable error code string property.
+ * 
+ * The lowlevel API will throw DatabaseError instances for all database-related errors.
+ * Invalid function arguments will throw TypeError.
+ */
+export const DatabaseError = lowlevel.DatabaseError as DatabaseErrorConstructor;

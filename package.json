@@ -19,8 +19,7 @@
     "dist"
   ],
   "scripts": {
-    "prepare": "npx node-gyp rebuild --debug && cp build/Debug/olmdb_lowlevel.node dist/olmdb_lowlevel_debug.node && npx node-gyp rebuild --release && cp build/Release/olmdb_lowlevel.node dist/olmdb_lowlevel_release.node",
-    "build": "rm -rf dist ; tsc",
+    "build": "rm -rf dist/*. ; tsc",
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",
     "test:node": "jest --verbose",
@@ -48,6 +47,7 @@
     "jest": "^30.0.3",
     "node-gyp": "^11.2.0",
     "ts-jest": "^29.2.6",
+    "tsdoc-markdown": "^1.2.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

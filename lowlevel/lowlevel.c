@@ -36,7 +36,6 @@
 #define MAX_KEY_LENGTH 511
 #define SKIPLIST_DEPTH 4
 #define MAX_RTXNS 254
-#define COMMIT_WORKER_SUFFIX "/commit_worker.sock"
 
 // Global state
 
@@ -78,8 +77,7 @@ static char *shared_memory_unused_start;
 static char *shared_memory_unused_end;
 static int commit_worker_fd = -1;
 static int mmap_fd = -1;
-// This buffer is exactly short enough to work with the unix domain socket mess. It is shared with the commit worker.
-char db_dir[sizeof(((struct sockaddr_un*)0)->sun_path) - sizeof(COMMIT_WORKER_SUFFIX) + 1]; // 
+char db_dir[PATH_MAX];
 
 void (*set_signal_fd_callback)(int fd) = NULL;
 
@@ -587,7 +585,7 @@ int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse) 
     return rc;
 }
 
-int sendfd(int sockfd, int fd)
+int send_fd(int sockfd, int fd)
 {
     /* Allocate a char array of suitable size to hold the ancillary data.
        However, since this buffer is in reality a 'struct cmsghdr', use a
@@ -647,7 +645,6 @@ int sendfd(int sockfd, int fd)
 }
 
 static int connect_to_commit_worker() {
-    struct sockaddr_un addr;
     for(int retry_count = 0; retry_count < 10; retry_count++) {
         int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
         if (fd == -1) {
@@ -655,9 +652,15 @@ static int connect_to_commit_worker() {
             return -1;
         }
         
+        struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
-        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s" COMMIT_WORKER_SUFFIX, db_dir);
+        // The 0 byte indicates were using the Abstract Socket Namespace.
+        // The checksum is used to ensure that the socket name is unique for this database directory.
+        // We prefer this over an actual socket file, as it avoids issues with stale socket files.
+        // Also, we avoid the max 108 bytes path length issue for regular unix sockets.
+        // This is Linux-specific though!
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%colmdb-%ld", 0, checksum(db_dir, strlen(db_dir), CHECKSUM_INITIAL));        
 
         // First try to bind, see if we can become the server
         if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
@@ -667,6 +670,8 @@ static int connect_to_commit_worker() {
             continue; // Now try to connect to the server
         } else if (errno != EADDRINUSE) {
             LOG_INTERNAL_ERROR("Failed to bind to socket '%s': %s", addr.sun_path, strerror(errno));
+        } else {
+            LOG("address in use");
         }
         
         // Try to become client instead
@@ -675,17 +680,18 @@ static int connect_to_commit_worker() {
             goto delayed_retry_connect;
         }
 
-        if (sendfd(fd, mmap_fd)) {
-            LOG_INTERNAL_ERROR("Failed to send shared memory file descriptor to commit worker: %s", strerror(errno));
-            goto delayed_retry_connect;
-        }
         init_command_t init_command = {
             .type = 'i',
             .mmap_ptr = (uintptr_t)shared_memory,
             .mmap_size = SHARED_MEMORY_SIZE,
         };
+
         if (send(fd, &init_command, sizeof(init_command), 0) < 0) {
             LOG_INTERNAL_ERROR("Failed to send init command to commit worker: %s", strerror(errno));
+            goto delayed_retry_connect;
+        }
+        if (send_fd(fd, mmap_fd)) {
+            LOG_INTERNAL_ERROR("Failed to send shared memory file descriptor to commit worker: %s", strerror(errno));
             goto delayed_retry_connect;
         }
 
@@ -736,8 +742,10 @@ int init(const char *_db_dir, void (*set_signal_fd)(int fd)) {
         return -1;
     }
 
-    strncpy(db_dir, _db_dir, sizeof(db_dir) - 1);
-    db_dir[sizeof(db_dir) - 1] = '\0'; // Ensure null termination
+    if (realpath(_db_dir, db_dir)==NULL) {
+        strncpy(db_dir, _db_dir, sizeof(db_dir) - 1);
+        db_dir[sizeof(db_dir) - 1] = '\0'; // Ensure null termination
+    }
     
     // Create database directory if it doesn't exist
     if (mkdir(db_dir, 0755) != 0 && errno != EEXIST) {
@@ -1191,7 +1199,10 @@ int get_commit_results(commit_result_t *results, int max_results) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Drained!
             if (errno == EINTR) continue; // Interrupted, try again
         }
-        else if (rc > 0) continue; // Data received
+        else if (rc > 0) {
+            fprintf(stderr, "Data from commit worker: %c len=%d\n", d, rc);
+            continue; // Data received
+        }
         // An error or EOF
         reconnect_commit_worker();
         break;
@@ -1203,6 +1214,7 @@ int get_commit_results(commit_result_t *results, int max_results) {
     int result_count = 0;
     while (ltxn) {
         ltxn_t *next = ltxn->next;
+        fprintf(stderr, "Processing ltxn %d state %d\n", ltxn_to_id(ltxn), ltxn->state);
         if (ltxn->state == TRANSACTION_COMMITTING || result_count >= max_results) {
             // Not done yet (or output buffer full), keep in queue
             ltxn->next = new_head;

@@ -12,7 +12,7 @@
         "lowlevel"
       ],
       "cflags": [
-        "-O2"
+        "-g"
       ],
     }
   ]

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, beforeAll } from "@jest/globals";
-const lowlevel = require("../build/Release/olmdb_lowlevel.node");
+import * as lowlevel from "../src/lowlevel";
 
 // Helper functions
 function stringToArrayBuffer(str: string): ArrayBufferLike {
@@ -12,32 +12,37 @@ function arrayBufferToString(buffer: ArrayBuffer): string {
     return decoder.decode(buffer);
 }
 
-function commitAndWait(transactionId: number): Promise<number> {
-    return new Promise((resolve, reject) => {
-        try {
-            const isAsync = lowlevel.commitTransaction(transactionId, (txnId: number, status: number) => {
-                resolve(status);
-            });
-            
-            if (!isAsync) {
-                // Read-only transaction completed immediately
-                resolve(lowlevel.TRANSACTION_SUCCEEDED);
-            }
-        } catch (error) {
-            reject(error);
+// Map to track pending transaction commits
+const pendingCommits = new Map<number, { resolve: (success: boolean) => void }>();
+
+function commitAndWait(transactionId: number): Promise<boolean> {
+    return new Promise((resolve) => {
+        // Store the resolver in our map
+        pendingCommits.set(transactionId, { resolve });
+        
+        // Attempt to commit the transaction
+        const isImmediate = lowlevel.commitTransaction(transactionId);
+        
+        if (isImmediate) {
+            // Read-only transaction completed immediately
+            pendingCommits.delete(transactionId);
+            resolve(true);
         }
+        // If not immediate, the onCommit callback will handle resolution
     });
 }
 
 describe('Lowlevel Tests', () => {
-    beforeAll(async () => {
-        try {
-            lowlevel.open("./.olmdb_test");
-        } catch (error: any) {
-            if (error.code !== "DUP_INIT") {
-                throw error; // Rethrow if it's not the expected error
+    beforeAll(() => {
+        // Initialize with global onCommit callback
+        lowlevel.init((transactionId: number, success: boolean) => {
+            // Resolve the corresponding promise
+            const pendingCommit = pendingCommits.get(transactionId);
+            if (pendingCommit) {
+                pendingCommit.resolve(success);
+                pendingCommits.delete(transactionId);
             }
-        }
+        }, "./.olmdb_test");
     });
 
     beforeEach(async () => {
@@ -48,7 +53,8 @@ describe('Lowlevel Tests', () => {
         let item;
         while ((item = lowlevel.readIterator(iterId)) !== undefined) {
             lowlevel.del(txnId, item.key);
-        }    
+        }
+        lowlevel.closeIterator(iterId);
         await commitAndWait(txnId);
     });
     
@@ -117,8 +123,8 @@ describe('Lowlevel Tests', () => {
             
             // Validation failure check
             lowlevel.put(txn1Id, stringToArrayBuffer("concurrent1"), stringToArrayBuffer("conflict"));
-            const status = await commitAndWait(txn1Id);
-            expect(status).toBe(lowlevel.TRANSACTION_RACED);
+            const success = await commitAndWait(txn1Id);
+            expect(success).toBe(false); // Expecting commit to fail
             
             // Final state verification
             const finalTxnId = lowlevel.startTransaction();

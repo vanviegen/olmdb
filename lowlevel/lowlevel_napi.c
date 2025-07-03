@@ -48,36 +48,41 @@ static void process_commit_results(napi_env env) {
     commit_result_t batch[MAX_BATCH_SIZE];
     int batch_size;
     
-    if (!on_commit_callback_ref) {
-        return;
-    }
-    
+    napi_handle_scope scope;
+    napi_open_handle_scope(env, &scope);
+
     napi_value callback, undefined, args[2], result;
-    napi_get_reference_value(env, on_commit_callback_ref, &callback);
     napi_get_undefined(env, &undefined);
+
+    if (on_commit_callback_ref) {
+        napi_get_reference_value(env, on_commit_callback_ref, &callback);
+    }
     
     do {
         batch_size = get_commit_results(batch, MAX_BATCH_SIZE);
+        fprintf(stderr, "Got %d commit results\n", batch_size);
         
-        // Process this batch and call the callback for each result
-        for (int i = 0; i < batch_size; i++) {
-            // Create the transaction ID argument
-            napi_create_int32(env, batch[i].ltxn_id, &args[0]);
-            // Create the success argument
-            napi_get_boolean(env, batch[i].success, &args[1]);
-            
-            // Call the JavaScript callback
-            napi_call_function(env, undefined, callback, 2, args, &result);
-        }        
-    } while (batch_size == MAX_BATCH_SIZE);  // If we got a full batch, there might be more
+        if (on_commit_callback_ref) {
+            // Process this batch and call the callback for each result
+            for (int i = 0; i < batch_size; i++) {
+                fprintf(stderr, "Processing commit result: txn_id=%d, success=%d\n", batch[i].ltxn_id, batch[i].success);
+                // Create the transaction ID argument
+                napi_create_int32(env, batch[i].ltxn_id, &args[0]);
+                // Create the success argument
+                napi_get_boolean(env, batch[i].success, &args[1]);
+                
+                // Call the JavaScript callback
+                napi_call_function(env, undefined, callback, 2, args, &result);
+            }
+        }
+    } while (batch_size == MAX_BATCH_SIZE); // If we got a full batch, there might be more
+
+    napi_close_handle_scope(env, scope);
 }
 
 // libuv poll callback for fd events
 static void on_poll_event(uv_poll_t* handle, int status, int events) {
-    if (status < 0 || !(events & UV_READABLE)) {
-        return;
-    }
-    
+    fprintf(stderr, "Poll event: status=%d, events=%d\n", status, events);
     process_commit_results(global_env);
 }
 
@@ -105,7 +110,7 @@ static void setup_signal_fd(int fd) {
     
     // Initialize and start polling
     uv_poll_init(loop, poll_handle, fd);
-    uv_poll_start(poll_handle, UV_READABLE, on_poll_event);
+    uv_poll_start(poll_handle, UV_READABLE, &on_poll_event);
 }
 
 // DatabaseError constructor implementation
