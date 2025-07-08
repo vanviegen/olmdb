@@ -3,7 +3,6 @@
  */
 
 #define _GNU_SOURCE // For memfd_create
-#include <assert.h>
 #include <errno.h>
 #include <linux/limits.h>
 #include <stddef.h>
@@ -34,12 +33,13 @@
 
 // Configuration constants
 #define SHARED_MEMORY_SIZE (4ULL * 1024 * 1024 * 1024) // 4 GB shared memory size
+#define LOG_BUFFER_BLOCK_SIZE (64 * 1024)
 #define MAX_LTXNS 0x100000
 #define MAX_ITERATORS 0x100000
-#define DEFAULT_LOG_BUFFER_SIZE (64 * 1024)
 #define MAX_KEY_LENGTH 511
 #define SKIPLIST_DEPTH 4
-#define MAX_RTXNS 254
+#define RTXN_SPAN_TIME_MS 100 // Read transactions are shared for 100 ms
+#define MAX_RTXNS 8 // At most 8 read transactions can be active at the same time
 
 // Macro's
 
@@ -48,13 +48,13 @@
 
 #define LOG(fmt, ...) \
     do { \
-        dprintf(2, "OLMDB: " fmt "\n", ##__VA_ARGS__); \
+        fprintf(stderr, "OLMDB: " fmt "\n", ##__VA_ARGS__); \
     } while (0)
 
 #define SET_ERROR(code_str, msg, ...) \
     do { \
-        snprintf(error_message, sizeof(error_message), msg, ##__VA_ARGS__); \
         snprintf(error_code, sizeof(error_code), "%s", code_str); \
+        snprintf(error_message, sizeof(error_message), msg, ##__VA_ARGS__); \
     } while(0)
 
 
@@ -71,7 +71,7 @@ static int next_unused_ltxn = 0; // Index of next never-used transaction
 static ltxn_t *ltxn_commit_queue_head = NULL; // List of ltxns handed to the commit worker for processing
 
 // Log buffers
-static log_buffer_t *first_free_log_buffer = NULL; // Start of linked-list of free log buffers of DEFAULT_LOG_BUFFER_SIZE
+static log_buffer_t *first_free_log_buffer = NULL; // Start of linked-list of free single-block buffers
 
 // Iterators
 static iterator_t iterators[MAX_ITERATORS]; // This is quite large, but Linux will allocate pages lazily
@@ -151,19 +151,22 @@ log_buffer_t *allocate_shared_memory_blocks(uint32_t blocks) {
             return new_buf;
         } else {
             // Allocate a new single block buffer at the end of the shared memory
-            shared_memory_unused_end -= DEFAULT_LOG_BUFFER_SIZE;
-            return (log_buffer_t *)shared_memory_unused_end;
+            shared_memory_unused_end -= LOG_BUFFER_BLOCK_SIZE;
+            log_buffer_t *new_buf = (log_buffer_t *)shared_memory_unused_end;
+            new_buf->blocks = 1;
+            new_buf->free = 0;
+            return new_buf;
         }
     }
 
     // Scan all multi-page allocations from the start of the buffer until we find a free one
     // that is large enough
     log_buffer_t *current = (log_buffer_t *)shared_memory;
-    while((char *)current < shared_memory_unused_start) {
+    while((char *)current < shared_memory_unused_start && current->blocks > 0) {
         log_buffer_t *next = (log_buffer_t *)((char *)current + LOG_BUFFER_BLOCK_SIZE * current->blocks);
         if (current->free) {
             // Merge with subsequent buffers if they're also free
-            while ((char *)next < shared_memory_unused_start && next->free) {
+            while ((char *)next < shared_memory_unused_start && next->blocks > 0 && next->free) {
                 current->blocks += next->blocks;
                 next = (log_buffer_t *)((char *)current + LOG_BUFFER_BLOCK_SIZE * current->blocks);
             }
@@ -189,6 +192,8 @@ log_buffer_t *allocate_shared_memory_blocks(uint32_t blocks) {
         SET_ERROR("OOM", "Not enough shared memory for %u blocks of size %d bytes", blocks, LOG_BUFFER_BLOCK_SIZE);
         return NULL;
     }
+    new_buf->blocks = blocks;
+    new_buf->free = 0;
     return new_buf;
 }
 
@@ -197,6 +202,7 @@ void release_shared_memory_blocks(log_buffer_t *buf) {
         // Single block buffer, just return it to the free list
         buf->next = first_free_log_buffer;
         first_free_log_buffer = buf;
+        // Never marked as free, as we don't want to reuse it in multi-block allocations
         return;
     }
 
@@ -210,7 +216,7 @@ static void *allocate_log_space(ltxn_t *ltxn, size_t needed_space) {
     // Align buffer position to 8 bytes
     ltxn->log_write_ptr = (char *)(((uintptr_t)ltxn->log_write_ptr + 7) & ~7);
     if (!ltxn->first_log_buffer || ltxn->log_write_ptr + needed_space > ltxn->log_end_ptr) {
-        uint32_t blocks = (needed_space + 7 /* for alignment */ + sizeof(log_buffer_t) + DEFAULT_LOG_BUFFER_SIZE - 1) / DEFAULT_LOG_BUFFER_SIZE;
+        uint32_t blocks = (needed_space + 7 /* for alignment */ + sizeof(log_buffer_t) + LOG_BUFFER_BLOCK_SIZE - 1) / LOG_BUFFER_BLOCK_SIZE;
         
         log_buffer_t *new_buf = allocate_shared_memory_blocks(blocks);
 
@@ -226,6 +232,7 @@ static void *allocate_log_space(ltxn_t *ltxn, size_t needed_space) {
     ltxn->log_write_ptr += needed_space;
     return result;
 }
+
 static read_log_t *create_read_log(ltxn_t *ltxn, size_t size, int32_t row_count) {    
     read_log_t *read_log = allocate_log_space(ltxn, size);
     ASSERT_OR_RETURN(read_log != NULL, NULL);
@@ -244,7 +251,7 @@ static read_log_t *create_read_log(ltxn_t *ltxn, size_t size, int32_t row_count)
 }
 
 static void release_ltxn_logs(ltxn_t *ltxn) {
-    // Free all except the first log buffer (which is always DEFAULT_LOG_BUFFER_SIZE bytes)
+    // Free all except the first log buffer (which is always LOG_BUFFER_BLOCK_SIZE bytes)
     log_buffer_t *lb = ltxn->first_log_buffer;
     ltxn->first_log_buffer = NULL;
     while(lb) {
@@ -291,8 +298,8 @@ static ltxn_t *id_to_open_ltxn(int ltxn_id) {
     int idx = ltxn_id >> 12;
     uint16_t nonce = ltxn_id & 0xfff;
     
-    if (idx >= MAX_LTXNS) {
-        SET_ERROR("INVALID_TRANSACTION", "Transaction index %d exceeds maximum %d", idx, MAX_LTXNS - 1);
+    if (idx < 0 || idx >= MAX_LTXNS) {
+        SET_ERROR("INVALID_TRANSACTION", "Transaction index %d not within valid range 0..%d", idx, MAX_LTXNS - 1);
         return NULL;
     }
     
@@ -325,13 +332,20 @@ static void assign_rtxn_wrapper(ltxn_t *ltxn) {
             return;
         }
         rtxn_wrapper = &rtxn_wrappers[next_unused_rtxn_wrapper++];
-        mdb_txn_begin(dbenv, NULL, MDB_RDONLY, &rtxn_wrapper->rtxn);
+        int rc = mdb_txn_begin(dbenv, NULL, MDB_RDONLY, &rtxn_wrapper->rtxn);
+        if (rc != MDB_SUCCESS) {
+            LOG_INTERNAL_ERROR("Failed to create read transaction (%s)", mdb_strerror(rc));
+            next_unused_rtxn_wrapper--;
+            ltxn->rtxn_wrapper = current_rtxn_wrapper; // do *something*?!
+            return;
+        }
     }
     rtxn_wrapper->ref_count = 1;
     current_rtxn_wrapper = rtxn_wrapper;
-    current_rtxn_expire_time = time+100; // Share this read transaction with all logical transactions started within the next 100 ms
+    current_rtxn_expire_time = time + RTXN_SPAN_TIME_MS; // Share this read transaction with all logical transactions started within the next 100 ms
     ltxn->rtxn_wrapper = rtxn_wrapper;
 }
+
 static void release_rtxn_wrapper(ltxn_t *ltxn) {
     rtxn_wrapper_t *rtxn_wrapper = ltxn->rtxn_wrapper;
     ASSERT_OR_RETURN(rtxn_wrapper != NULL,);
@@ -348,6 +362,7 @@ static void release_rtxn_wrapper(ltxn_t *ltxn) {
     }
     ltxn->rtxn_wrapper = NULL;
 }
+
 // Find an available transaction slot
 static ltxn_t *allocate_ltxn() {
     ltxn_t *ltxn;
@@ -360,10 +375,11 @@ static ltxn_t *allocate_ltxn() {
         SET_ERROR("TXN_LIMIT", "Transaction limit reached - no available transaction slots (max: %d)", MAX_LTXNS);
         return NULL;
     }
-    ltxn->nonce = get_random_number() & 0xfff; // Generate a random nonce
+    ltxn->nonce = (ltxn->nonce + 1) & 0xfff; // Prevent rapid reuse of transaction IDs
     ltxn->state = TRANSACTION_OPEN;
     return ltxn;
 }
+
 static iterator_t *id_to_open_iterator(int iterator_id) {
     int idx = iterator_id >> 12;
     uint16_t nonce = iterator_id & 0xfff;
@@ -382,11 +398,13 @@ static iterator_t *id_to_open_iterator(int iterator_id) {
     
     return iterator;
 }
+
 static int iterator_to_id(iterator_t *iterator) {
     int idx = iterator - iterators;
     ASSERT(idx >= 0 && idx < MAX_ITERATORS);
     return (idx << 12) | (iterator->nonce & 0xfff);
 }
+
 static iterator_t *allocate_iterator(ltxn_t *ltxn) {
     iterator_t *iterator;
     if (first_free_iterator) {
@@ -403,9 +421,10 @@ static iterator_t *allocate_iterator(ltxn_t *ltxn) {
         return NULL;
     }
     iterator->ltxn_id = ltxn_to_id(ltxn);
-    iterator->nonce = get_random_number() & 0xfff; // Generate a random nonce
+    iterator->nonce = (iterator->nonce + 1) & 0xfff; // Prevent rapid reuse of iterator IDs
     return iterator;
 }
+
 // if_not_found: 0=returning nothing 1=return next 2=return previous
 static update_log_t *find_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data, int if_not_found) {
     int level = SKIPLIST_DEPTH - 1;
@@ -437,6 +456,7 @@ static update_log_t *find_update_log(ltxn_t *ltxn, uint16_t key_size, const char
     }
     return NULL;
 }
+
 static update_log_t *find_last_update_log(ltxn_t *ltxn) {
     int level = SKIPLIST_DEPTH - 1;
     update_log_t **next_ptrs = ltxn->update_log_skiplist_ptrs;
@@ -456,6 +476,7 @@ static update_log_t *find_last_update_log(ltxn_t *ltxn) {
     // This cast happens to be right, as the next_ptrs are at the start of the record_t
     return (update_log_t *)next_ptrs;
 }
+
 static void add_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data, uint32_t value_size, const char *value_data) {
     int size = sizeof(update_log_t) + (int)key_size + value_size;
     // Align to 4 bytes for update_log_t as per the new alignment requirement
@@ -514,6 +535,7 @@ static void add_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data
         delete_update_log(ltxn, new_log->next_ptrs[0]);
     }
 }
+
 static void delete_update_log(ltxn_t *ltxn, update_log_t *log) {
     // Find all predecessors that point to this log entry across all levels
     int level = SKIPLIST_DEPTH - 1;
@@ -547,7 +569,7 @@ static void delete_update_log(ltxn_t *ltxn, update_log_t *log) {
     }
 }
 
-int send_fd(int sockfd, int fd)
+static int send_fd(int sockfd, int fd)
 {
     /* Allocate a char array of suitable size to hold the ancillary data.
        However, since this buffer is in reality a 'struct cmsghdr', use a
@@ -573,7 +595,7 @@ int send_fd(int sockfd, int fd)
 
     /* On Linux, we must transmit at least one byte of real data in order to
        send ancillary data. We transmit an arbitrary integer whose value is
-       ignored by recvfd(). */
+       ignored by recv_fd(). */
 
     struct iovec iov;
     int data;
@@ -612,7 +634,11 @@ static void start_commit_worker(int socket_fd, const char *db_dir) {
         LOG_INTERNAL_ERROR("Failed to fork server process: %s", strerror(errno));
         return;
     }
-    if (pid > 0) return; // Parent process, return immediately
+    if (pid > 0) {
+        // Parent process, wait for the child to exit (as it's doing its second fork to daemonize), and then return
+        waitpid(pid, NULL, 0);
+        return;
+    }
 
     // Close all file descriptors except the socket
     for (int fd = 0; fd < 1024; fd++) {
@@ -634,7 +660,7 @@ static void start_commit_worker(int socket_fd, const char *db_dir) {
 }
 
 static int connect_to_commit_worker() {
-    LOG("Connecting to commit worker...");
+    // LOG("Connecting to commit worker...");
     for(int retry_count = 0; retry_count < 10; retry_count++) {
         int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
         if (fd == -1) {
@@ -660,8 +686,6 @@ static int connect_to_commit_worker() {
             continue; // Now try to connect to the server
         } else if (errno != EADDRINUSE) {
             LOG_INTERNAL_ERROR("Failed to bind to socket '%s': %s", addr.sun_path, strerror(errno));
-        } else {
-            LOG("address in use");
         }
         
         // Try to become client instead
@@ -685,8 +709,11 @@ static int connect_to_commit_worker() {
             LOG_INTERNAL_ERROR("Failed to send shared memory file descriptor to commit worker: %s", strerror(errno));
             goto delayed_retry_connect;
         }
+        // LOG("Connected to commit worker");
 
-        LOG("Connected to commit worker");
+        if (set_signal_fd_callback) {
+            set_signal_fd_callback(fd);
+        }
         return fd;
     delayed_retry_connect:
         close(fd);
@@ -713,12 +740,6 @@ void reconnect_commit_worker() {
     commit_worker_fd = connect_to_commit_worker();
 }
 
-static void await_children(int signal) {
-    while (waitpid((pid_t) (-1), 0, WNOHANG) > 0) {
-        fprintf(stderr, "Child process reaped\n");
-    }
-}
-
 int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_fd)(int fd)) {
     if (dbenv) {
         SET_ERROR("DUP_INIT", "Database is already init");
@@ -735,19 +756,14 @@ int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_
         }
     }
 
-    if (strlen(_db_dir) >= sizeof(db_dir)) {
-        SET_ERROR("DIR_TOO_LONG", "Database directory path exceeds maximum length of %zu characters", sizeof(db_dir) - 1);
+    // Create database directory if it doesn't exist
+    if (mkdir(_db_dir, 0755) != 0 && errno != EEXIST) {
+        SET_ERROR("CREATE_DIR_FAILED", "Failed to create/open database directory '%.512s': %s", _db_dir, strerror(errno));
         return -1;
     }
 
     if (realpath(_db_dir, db_dir)==NULL) {
-        strncpy(db_dir, _db_dir, sizeof(db_dir) - 1);
-        db_dir[sizeof(db_dir) - 1] = '\0'; // Ensure null termination
-    }
-
-    // Create database directory if it doesn't exist
-    if (mkdir(db_dir, 0755) != 0 && errno != EEXIST) {
-        SET_ERROR("CREATE_DIR_FAILED", "Failed to create/open database directory '%.512s': %s", db_dir, strerror(errno));
+        SET_ERROR("CREATE_DIR_FAILED", "Failed to resolve database directory '%s': %s", _db_dir, strerror(errno));
         return -1;
     }
 
@@ -782,16 +798,9 @@ int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_
     ltxns = (ltxn_t *)((uintptr_t)(shared_memory + SHARED_MEMORY_SIZE - sizeof(ltxn_t) * MAX_LTXNS) & ~4095); // Align to 4kb
     shared_memory_unused_end = (char *)ltxns;
 
-    // Setup signal to await exiting children
-    signal(SIGCHLD, await_children);
-
     commit_worker_bin = strdup(_commit_worker_bin);
     commit_worker_fd = connect_to_commit_worker();
     if (commit_worker_fd < 0) return -1; // Error already set
-
-    if (set_signal_fd_callback) {
-        set_signal_fd_callback(commit_worker_fd);
-    }
 
     return 0;
 }
@@ -812,6 +821,10 @@ int start_transaction() {
 }
 
 int put(int ltxn_id, const void *key_data, size_t key_size, const void *value_data, size_t value_size) {
+    if (key_size < 1) {
+        SET_ERROR("EMPTY_KEY", "Key must be at least 1 byte");
+        return -1;
+    }
     if (key_size > MAX_KEY_LENGTH) {
         SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
                   key_size, MAX_KEY_LENGTH);
@@ -828,6 +841,10 @@ int put(int ltxn_id, const void *key_data, size_t key_size, const void *value_da
 }
 
 int del(int ltxn_id, const void *key_data, size_t key_size) {
+    if (key_size < 1) {
+        SET_ERROR("EMPTY_KEY", "Key must be at least 1 byte");
+        return -1;
+    }
     if (key_size > MAX_KEY_LENGTH) {
         SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
                   key_size, MAX_KEY_LENGTH);
@@ -844,6 +861,10 @@ int del(int ltxn_id, const void *key_data, size_t key_size) {
 }
 
 int get(int ltxn_id, const void *key_data, size_t key_size, void **value_data, size_t *value_size) {
+    if (key_size < 1) {
+        SET_ERROR("EMPTY_KEY", "Key must be at least 1 byte");
+        return -1;
+    }
     if (key_size > MAX_KEY_LENGTH) {
         SET_ERROR("KEY_TOO_LONG", "Key size %zu exceeds maximum allowed length %d", 
                   key_size, MAX_KEY_LENGTH);
@@ -873,15 +894,22 @@ int get(int ltxn_id, const void *key_data, size_t key_size, void **value_data, s
     MDB_val key, value;
     key.mv_data = (void*)key_data;
     key.mv_size = key_size;
+    ASSERT_OR_RETURN(ltxn->rtxn_wrapper->rtxn != NULL, -1);
     int rc = mdb_get(ltxn->rtxn_wrapper->rtxn, dbi, &key, &value);
-    
+
     if (rc == MDB_SUCCESS || rc == MDB_NOTFOUND) {
         read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + key_size, 0);
+        ASSERT(read_log);
         if (read_log) {
             read_log->checksum = (rc == MDB_NOTFOUND) ? 0 : checksum(value.mv_data, value.mv_size, CHECKSUM_INITIAL);
             read_log->key_size = key_size;
             memcpy(read_log->key_data, key_data, key_size);
         }
+    }
+
+    if (rc == EINVAL) {
+        SET_ERROR("EINVAL", "Key length %d, key '%.*s', first char '%c'", key_size, (int)key_size, (char*)key_data, ((char *)key_data)[0]);
+        return -1; // Invalid key size
     }
     
     if (rc == MDB_NOTFOUND) {
@@ -891,7 +919,7 @@ int get(int ltxn_id, const void *key_data, size_t key_size, void **value_data, s
     }
     
     if (rc != MDB_SUCCESS) {
-        SET_LMDB_ERROR("Get failed", rc);
+        SET_LMDB_ERROR("mdb_get", rc);
         return -1; // Error occurred
     }
     
@@ -919,30 +947,15 @@ int create_iterator(int ltxn_id,
     // Fetch the transaction
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
     if (!ltxn) return -1; // Error already set
-    
-    // Create read log with row_count indicating direction (positive for forward, negative for backward)
-    read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + start_key_size, reverse ? -1 : 1);
-    if (!read_log) {
-        SET_ERROR("OOM", "Failed to allocate memory for iterator");
-        return -1;
-    }
-    
+
     iterator_t *it = allocate_iterator(ltxn);
     if (!it) return -1; // Error already set
-    
+
     it->end_key_size = (uint16_t)end_key_size;
     it->end_key_data = end_key_data;
     it->next = ltxn->first_iterator;
     ltxn->first_iterator = it;    
-    it->iterate_log = read_log;
-    
-    // Reset row count for this iterator - will be incremented as we read
-    read_log->row_count = 0;
-    read_log->key_size = start_key_size;
-    if (start_key_size > 0) {
-        memcpy(read_log->key_data, start_key_data, start_key_size);
-    }
-    
+
     if (start_key_size > 0) {
         it->current_update_log = find_update_log(ltxn, start_key_size, start_key_data, reverse ? 2 : 1);
         it->lmdb_key.mv_data = (void*)start_key_data; // non-const, but LMDB doesn't modify it
@@ -956,9 +969,22 @@ int create_iterator(int ltxn_id,
     
     int rc = place_cursor(it->cursor, &it->lmdb_key, &it->lmdb_value, reverse);
     if (rc != MDB_SUCCESS) {
-        SET_LMDB_ERROR("Place cursor failed", rc);
+        SET_LMDB_ERROR("place_cursor", rc);
         return -1;
     }
+
+    // Create read log with row_count indicating direction (positive for forward, negative for backward)
+    read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + start_key_size, reverse ? -1 : 1);
+    if (!read_log) {
+        SET_ERROR("OOM", "Failed to allocate memory for read log");
+        return -1;
+    }
+        
+    read_log->key_size = start_key_size;
+    if (start_key_size > 0) {
+        memcpy(read_log->key_data, start_key_data, start_key_size);
+    }   
+    it->iterate_log = read_log;
     
     uint64_t cs = CHECKSUM_INITIAL;
     cs = checksum(it->lmdb_key.mv_data, it->lmdb_key.mv_size, cs);
@@ -1016,7 +1042,7 @@ restart_read_iterator:
             it->lmdb_key.mv_data = it->lmdb_value.mv_data = NULL; // mark cursor as at the end of the database
             it->lmdb_key.mv_size = it->lmdb_value.mv_size = 0;
         } else if (rc != MDB_SUCCESS) {
-            SET_LMDB_ERROR("Cursor next failed", rc);
+            SET_LMDB_ERROR("mdb_cursor_get next", rc);
             return -1;
         }
         
@@ -1131,55 +1157,58 @@ int commit_transaction(int ltxn_id) {
     return 0; // Async work queued
 }
 
-// This function should be called periodically, or when data is available on the commit worker fd
-// Returns...
-// > 0: number of results returned
-// 0: no results, but call again later as ltxns are still being committed
-// -1: no results, and no more ltxns are being committed
-int get_commit_results(commit_result_t *results, int max_results) {
-    // In case our user doesn't use the commit worker fd to monitor for signals,
-    // we need to drain it, to make sure it doesn't fill up and block the worker.
-    // Also, we want to check if the fd is still valid (meaning the worker is still running).
-    fprintf(stderr, "get_commit_results\n");
+int drain_signal_fd(int blocking) {
+    int result = 0;
     while (1) {
         char d;
-        int rc = recv(commit_worker_fd, &d, 1, MSG_DONTWAIT);
+        int rc = recv(commit_worker_fd, &d, 1, (blocking && !result) ? 0 : MSG_DONTWAIT);
         if (rc < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Drained!
             if (errno == EINTR) continue; // Interrupted, try again
+            LOG("Error receiving data from commit worker: %s", strerror(errno));
         }
         else if (rc > 0) {
-            fprintf(stderr, "Data from commit worker: %c len=%d\n", d, rc);
+            result = 1;
             continue; // Data received
         }
-        fprintf(stderr, "Commit worker rc=%d errno=%d\n", rc, errno);
         // An error or EOF
         reconnect_commit_worker();
-        break;
+        if (commit_worker_fd < 0) break;
     }
+    return result;
+}
 
+int get_commit_results(commit_result_t *results, int *result_count) {
     ltxn_t *new_head = NULL;
     ltxn_t *ltxn = ltxn_commit_queue_head;
 
-    int result_count = 0;
+    int max_results = *result_count;
+    int index = 0;
+    int return_value = 0;
     while (ltxn) {
         ltxn_t *next = ltxn->next;
-        fprintf(stderr, "Processing ltxn %d state %d\n", ltxn_to_id(ltxn), ltxn->state);
-        if (ltxn->state == TRANSACTION_COMMITTING || result_count >= max_results) {
-            // Not done yet (or output buffer full), keep in queue
+        if (index >= max_results) {
+            // Output buffer full, keep in queue
             ltxn->next = new_head;
             new_head = ltxn;
+            return_value = 2;
+        } else if (ltxn->state == TRANSACTION_COMMITTING) {
+            // Not done yet, keep in queue
+            ltxn->next = new_head;
+            new_head = ltxn;
+            return_value = max(return_value, 1);
         } else {
-            results[result_count].ltxn_id = ltxn_to_id(ltxn);
-            results[result_count].success = (ltxn->state == TRANSACTION_SUCCEEDED) ? 1 : 0;
-            result_count++;
+            results[index].ltxn_id = ltxn_to_id(ltxn);
+            results[index].success = (ltxn->state == TRANSACTION_SUCCEEDED) ? 1 : 0;
+            index++;
             release_ltxn(ltxn);
         }
         ltxn = next;
     }
     ltxn_commit_queue_head = new_head;
+    *result_count = index;
 
-    return result_count ? result_count : (ltxn_commit_queue_head ? - 1: 0);
+    return return_value;
 }
 
 int abort_transaction(int ltxn_id) {

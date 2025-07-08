@@ -1,5 +1,6 @@
+import * as lowlevel from "../dist/lowlevel.js";
 import { describe, test, expect, beforeEach, beforeAll } from "@jest/globals";
-import * as lowlevel from "../src/lowlevel";
+
 
 // Helper functions
 function stringToArrayBuffer(str: string): ArrayBufferLike {
@@ -32,19 +33,21 @@ function commitAndWait(transactionId: number): Promise<boolean> {
     });
 }
 
-describe('Lowlevel Tests', () => {
-    beforeAll(() => {
-        // Initialize with global onCommit callback
-        lowlevel.init((transactionId: number, success: boolean) => {
-            // Resolve the corresponding promise
-            const pendingCommit = pendingCommits.get(transactionId);
-            if (pendingCommit) {
-                pendingCommit.resolve(success);
-                pendingCommits.delete(transactionId);
-            }
-        }, "./.olmdb_test");
-    });
+try {
+    // Initialize with global onCommit callback
+    lowlevel.init((transactionId: number, success: boolean) => {
+        // Resolve the corresponding promise
+        const pendingCommit = pendingCommits.get(transactionId);
+        if (pendingCommit) {
+            pendingCommit.resolve(success);
+            pendingCommits.delete(transactionId);
+        }
+    }, "./.olmdb_test");
+} catch (e: any) {
+    if (e.code !== "DUP_INIT") throw e;
+}
 
+describe('Lowlevel Tests', () => {
     beforeEach(async () => {
         // Clear the database before each test
         const txnId = lowlevel.startTransaction();

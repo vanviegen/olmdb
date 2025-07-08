@@ -1,14 +1,14 @@
 # OLMDB - Optimistic LMDB
 **A very fast embedded key/value store featuring ACID transactions using optimistic locking, based on LMDB.**
 
-OLMDB is a high-performance, embedded database that combines the speed and reliability of LMDB with optimistic concurrency control. It provides ACID transactions with automatic retry logic for handling concurrent access patterns, making it ideal for applications that need performance, consistency and parallel (long running) read/write transactions.
+OLMDB is a high-performance, embedded on-disk key/value store that combines the speed and reliability of LMDB with optimistic concurrency control and fast batched commits. It provides ACID transactions with automatic retries for handling concurrent access patterns, making it ideal for applications that need performance, consistency and parallel (long running) read/write transactions.
 
 **Features:**
 
-- 🚀 **High Performance**: Built on LMDB, one of the fastest embedded databases, providing zero-copy data access.
+- 🚀 **High Performance**: Built on LMDB, one of the fastest embedded databases, providing zero-copy data access. Read/write commits are automatically batched to enhance throughput.
 - 🔒 **ACID Transactions**: Full transaction support with optimistic locking and built-in retry for race conditions.
-- 📦 **Zero Dependencies**: Minimal footprint, running on both Node and Bun.
-- 🔧 **Simple API**: Fully typed, fast synchronous database reads, promise-based commits.
+- 📦 **Zero Dependencies**: Minimal footprint, running on both Node and Bun. No server process to manage.
+- 🔧 **Simple API**: Near-instantaneous synchronous database reads and updates. Promise-based commits.
 
 **Important caveat**: OLMDB (probably) only runs on Linux currently.
 
@@ -36,12 +36,8 @@ async function main() {
     
     // Scan through data, starting at 'user:2' (meaning 'user:3' comes first as 'user:2' does not exist)
     await transact(() => {
-        for (const { key, value } of scan({
-            start: 'user:2',
-            keyConvert: asString,
-            valueConvert: asString
-        })) {
-            console.log(`${key}: ${value}`);
+        for (const { key, value } of scan({start: 'user:2'})) {
+            console.log(key, value);
         }
     });
 }
@@ -53,12 +49,14 @@ main().catch(console.error);
 ## Installation
 ```bash
 npm install olmdb
+# or
+bun add olmdb
 ```
 
 **Requirements:**
+- Linux (contributions to support other platforms are very welcome!)
 - Node.js 14+ or Bun runtime
-- Standard build tools (GCC/G++, make) for native compilation via node-gyp
-- Python 3.x (required by node-gyp)
+- GCC for native module compilation
 
 
 ## High-level API Tutorial
@@ -69,7 +67,7 @@ The database auto-initializes on first use, but you can explicitly initialize it
 ```typescript
 import { init } from 'olmdb';
 
-init('./my-app-data'); // Custom directory
+init('./my-app-data'); // Custom data directory
 ```
 
 The call to `init` may happen only once, and should be done before the first call to `transact`.
@@ -222,19 +220,18 @@ What this demonstrates is a race condition, gracefully handled by a retry:
 - In the meantime, the result2 transaction will have read and updated the `counter`.
 - On write-commit, the result1 transaction notices that `counter` has changed since it has read it, invalidating the transaction, and running the provided function again. This time it reads 52 instead of 42.
 
-OLMDB retries a transaction 3 times before giving up (and throwing an exception).
+OLMDB retries a transaction 4 times before giving up (and throwing an exception).
 
 
 ## Architecture
 
 ### Components
-OLMDB consists of four parts:
-- A TypeScript file providing a high-level API for this library.
-- A NAPI native module, providing low-level functionality on which the former is built. It consists of:
-  - `lowlevel.c`: A C-style API providing a concurrent optimistic read/write transaction abstraction around LMDB.
-  - `commit_worker.c`: Code used by `lowlevel.c` for our singleton commit worker process, started automatically by the first client.
-  - `lowlevel_napi.c`: A NAPI wrapper around the C-style provided by `lowlevel.c`.
-  - The vendored LMDB source files.
+OLMDB consists of five parts, each building on the one below:
+- The high-level TypeScript API (`olmdb.ts`) for this library.
+- The low-level TypeScript API (`lowlevel.ts`) that loads and exposes the API provided by the NAPI module.
+- The NAPI module (`napi.c`) that provides a low-level JavaScript API for the OLMDB client library.
+- The OLMDB client library (`transaction_client.c`) that provides optimistic read/write transactions on top of LMDB. It has no relation to JavaScript. Database reads are performed synchronously. Commits for read/write transactions are performed asyncronously by the commit worker daemon.
+- The commit worker daemon (`commit_worker.c`), shared by all clients for a database and spawned automatically by the first client. It processes queued read/write transactions and commits them to LMDB.
 
 ### Transactions
 The native module manages transactions (start, commit, abort), and all read (get, scan) and write (put, del) operations must happen within such a transaction. Multiple transactions can run simultaneously from the same JavaScript process, allowing work for different clients to be interleaved (using async/await or callbacks). 
@@ -243,12 +240,15 @@ The native module manages transactions (start, commit, abort), and all read (get
 For each OLMDB transaction, a corresponding read-only LMDB transaction is created. That gives us a consistent snapshot view of the store, from which all reads (get, scan) are done. For every read from LMDB, we log into memory associated with the transaction which key was read and a checksum of its value. We'll use this for commits, as explained below.
 
 ### Writes
-When writes (put, del) are performed, they are initially only stored in-memory in a buffer local to this transaction. Any further reads will first search the buffer, before consulting the underlying LMDB store, such that a transaction can read back its own writes. The buffer is organized as a skiplist, making searching the buffer very fast even when a transaction contains many writes.
+When writes (put, del) are performed, they are initially only stored in-memory in a buffer local to this transaction. Any further reads will first search the buffer, before consulting the underlying LMDB store, such that a transaction can read back its own writes. The buffer is organized as a skiplist, so that searching the buffer is very fast even when a transaction contains many writes.
 
 ### Aborts and commits
-If a transaction is aborted, the write buffer is just discarded and nothing is saved to LMDB. In case of a read-only transaction commit, we do the same. This happens synchronously. For read/write commits, we queue the transaction, including its read and write buffers for processing by the *write-commit thread* (explained below). Once a commit has been processed, its callback function is invoked with the commit status as an argument (from the main thread).
+If a transaction is aborted, the write buffer is just discarded and nothing is saved to LMDB. In case of a read-only transaction commit, we do the same. This happens synchronously. For read/write commits, we queue the transaction, including its read and write buffers for processing by the *commit worker daemon* (explained below). Once a commit has been processed, its callback function is invoked with the commit status as an argument (from the main thread).
 
-### Write-commit thread
+### Commit worker daemon
+The commit worker daemon is a single-threaded process that runs in the background, processing queued read/write transactions. It is spawned automatically by the first OLMDB client that accesses the database, and it will run until 10s after the last client has disconnected. Clients connect to the daemon using a unix domain socket (in the abstract socket
+namespace). Clients store their transaction buffers in a shared memory region, which is also opened by the commit worker daemon. The socket is only used to communicate the address of each transaction to be committed to the daemon, and to signal "at least one transaction has been processed" back to the client.
+
 Once one or more read/write commits have been queued, the write-commit thread will start a read/write LMDB transaction. Note that LMDB only allows for a single read/write transaction at a time, so that's why we do this from a single thread and we try to process transactions as quickly as we can.
 
 Within a single LMDB transaction, we can run a bunch of OLMDB transactions as follows:
@@ -256,19 +256,19 @@ Within a single LMDB transaction, we can run a bunch of OLMDB transactions as fo
 1. First replay all of the *reads* the transaction has performed (and stored in the read buffer) in its initial phase, verifying that the results are still the same based on the stored checksums. If not, the transaction has been raced by another transaction. Writes for this transaction will not be performed, and the 'raced' status is communicated back to committing code.
 2. All of the writes are performed on LMDB. This should never fail, under normal circumstances. The 'success' status is communicated back to the committing code. 
 
-After a batch of OLMDB transactions has been processed, the LMDB transaction is committed, and work can be started on the next batch. Batching commits can help write performance, as writes to pages in the top regions of b-tree can often be shared between transactions.
+After a batch of OLMDB transactions has been processed, the LMDB transaction is committed, and work can be started on the next batch. Batching commits can improve write performance immensely, as writes to pages in the top regions of b-tree and file syncs can usually be shared between transactions.
 
 ### Retryable transactions
 The high-level API, written in TypeScript provides a `transact(func)` method that runs a function within the context of an OLMDB transaction. This transaction context is preserved in [AsyncLocalStorage](https://nodejs.org/api/async_context.html#class-asynclocalstorage), so that you can just call functions like `put` and `get` without having to pass along a transaction object. This can be convenient when database accesses are deeply nested.
 
-After the provided function is done running, `transact()` does an OLMDB commit, and (for read/write transactions) registers a callback function. In case it gets called with a 'raced' status, the function will be executed again within a new transaction context. This happens up to three times before giving up.
+After the provided function is done running, `transact()` does an OLMDB commit, and (for read/write transactions) registers a callback function. In case it gets called with a 'raced' status, the function will be executed again within a new transaction context. This happens up to four times before giving up.
 
 ### Scaling
-LMDB allows multiple processes (on the same machine) to safely operate on the same database file. However, only one read/write transaction will be allowed to run at a time. So when scaling your deployment by creating multiple JavaScript processes, each of these will create its own worker thread, but only one of them will be committing transactions at a time. Given the trade-offs that LMDB makes, this is close to the best we can do (though coordinating between processes to share a single write-commit thread may be slightly more efficient, but a lot more complex/fragile).
+You can run as many JavaScript processes, and within each as many concurrent request handlers as you want. LMDB allows multiple processes (on the same machine) to safely run read-only transaction in the same database file simultaneously. All read/write operations are committed to LMDB by the single threaded commit worker daemon, which may be a bottleneck for write-heavy workloads, though it's highly efficient and sure therefore scale to thousands of transactions per second. 
 
-I expect this architecture to be able to provide huge throughput and very low latencies, though actual performance tests haven't been done yet.
+In the `benchmark` directory you can find the start of a benchmarking suite to get some feel for performance.
 
-In case you eventually need to scale beyond a single server, that can only be done at the application level. 
+OLMDB can only scale vertically, on a single server. In case you eventually need to scale beyond a single server, that can only be done at the application level. 
 
 
 ## API Reference
@@ -502,7 +502,7 @@ Initializes the database system with the specified directory.
 
 | Function | Type |
 | ---------- | ---------- |
-| `init` | `(onCommit: (transactionId: number, success: boolean) => void, directory?: string or undefined) => void` |
+| `init` | `(onCommit: (transactionId: number, success: boolean) => void, directory?: string or undefined, commitWorkerBin?: string) => void` |
 
 Parameters:
 
@@ -511,6 +511,8 @@ transaction commit completes. The callback receives the transaction ID and
 whether the commit succeeded.
 * `directory`: Optional path to the database directory. If not provided,
 defaults to the OLMDB_DIR environment variable or "./.olmdb".
+* `commitWorkerBin`: Path to the commit worker binary. Defaults to
+`<base_dir>/build/release/commit_worker`.
 
 
 ### startTransaction

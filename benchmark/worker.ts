@@ -1,15 +1,21 @@
-import * as olmdb from '../src/olmdb';
+import * as olmdb from 'olmdb';
 
-process.on('message', async (msg: any) => {
-    const { db_dir, value_size, gets_per_transaction, puts_per_transaction, tasks_per_thread, key_count, duration } = msg;
-    const putValue = new Uint8Array(value_size).fill('x'.charCodeAt(0));
-    olmdb.open(db_dir);
+export async function run({ db_dir, value_size, gets_per_transaction, puts_per_transaction, tasks_per_thread, key_count, duration }) {
+    const putValues: Uint8Array[] = [];
+    for(let i=0; i<10; i++) {
+        putValues.push(new Uint8Array(value_size).fill((''+i).charCodeAt(0)));
+    }
+    try {
+        olmdb.init(db_dir);
+    } catch(e: any) {
+        if (e.code !== "DUP_INIT") throw e;
+    }
 
     let transactions = 0;
     let tries = 0;
 
     const tasks: Promise<void>[] = [];
-    const endTime = Date.now() + duration;
+    const endTime = Date.now() + duration * 1000;
     for (let i = 0; i < tasks_per_thread; i++) {
         tasks.push((async () => {
             while (Date.now() < endTime) {
@@ -22,7 +28,7 @@ process.on('message', async (msg: any) => {
                     }
                     for(let j = 0; j < puts_per_transaction; j++) {
                         const key = Math.floor(Math.random() * key_count).toString();
-                        olmdb.put(key, putValue);
+                        olmdb.put(key, putValues[transactions % putValues.length]);
                     }
                 });
 
@@ -30,7 +36,12 @@ process.on('message', async (msg: any) => {
         })());
     }
     await Promise.all(tasks);
+    return { transactions, retries: tries - transactions };
 
-    process.send!({ transactions, retries: tries - transactions });
+}
+
+process.on('message', async (options: any) => {
+    const result = await run(options);
+    process.send!(result);
     process.exit(0);
 });

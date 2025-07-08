@@ -1,5 +1,5 @@
 import * as os from 'os';
-import * as olmdb from '../src/olmdb';
+import * as olmdb from 'olmdb';
 
 // Just use numbers for keys, but stored as binary data
 export function keyFromNumber(n: number): Uint8Array {
@@ -16,7 +16,7 @@ export function numberFromKey(key: Uint8Array): number {
 
 export async function generateDataset(dbDir: string, numKeys: number, valueSize: number) {
     console.log(`Generating dataset with ${numKeys} keys of size ${valueSize}...`);
-    olmdb.open(dbDir);
+    olmdb.init(dbDir);
     const value = new Uint8Array(valueSize);
     await olmdb.transact(() => {
         for (let i = 0; i < numKeys; i++) {

@@ -1,18 +1,19 @@
 #include "common.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/epoll.h>
-#include <fcntl.h>
 #include <sys/mman.h>
-#include <linux/limits.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 
-#define MAX_BATCHED_COMMITS 1024 // Maximum number of ltxn that we retry to process in a single wtxn
-#define MAX_CLIENTS 254 // Maximum number of processes that may open the database at once (higher than MAX_RTXNS has no use)
+#define MAX_BATCHED_COMMITS 10240 // Maximum number of ltxn that we try to process in a single wtxn
+#define MAX_CLIENTS 256 // Maximum number of processes that can be connected to this worker
 
 #define LOG(fmt, ...) \
     do { \
@@ -23,7 +24,7 @@
 
 #define SET_ERROR(code_str, msg, ...) \
     do { \
-        LOG("[" code_str "] " msg, ##__VA_ARGS__); \
+        LOG("[%s] " msg, code_str, ##__VA_ARGS__); \
     } while(0)
 
 // Translate Pointer, from JS process address space to our address space
@@ -225,6 +226,11 @@ static void handle_client_command(int client_fd) {
         if (client->shared_memory) {
             munmap(client->shared_memory, client->shared_memory_size);
             memset(client, 0, sizeof(client_t)); // Reset client state
+            for(int i = 0; i < queued_commit_count; i++) {
+                if (queued_commits[i].client_fd == client_fd) {
+                    queued_commits[i--] = queued_commits[--queued_commit_count]; // Remove from queue
+                }
+            }
         }
         return;
     }
@@ -280,7 +286,6 @@ static void handle_client_command(int client_fd) {
 static void error_shutdown() {
     // Let's hope a new worker will be started that is more successful
     LOG("Shutting down commit worker due to unexpected error");
-    if (dbenv) mdb_env_close(dbenv);
     // Underscore means atexit handlers (from libuv/node) should not be called
     _exit(1);
 }
@@ -334,7 +339,7 @@ static int validate_reads(MDB_txn *wtxn, ltxn_t *ltxn, uintptr_t shared_memory_d
             } else if (rc == MDB_SUCCESS) {
                 cs = checksum((char *)value.mv_data, value.mv_size, cs);
             } else {
-                LOG_INTERNAL_ERROR("Failed to read key %.*s during validation: %s", (int)key.mv_size, (char *)key.mv_data, mdb_strerror(rc));
+                LOG_INTERNAL_ERROR("Failed to read key '%.*s' during validation: %s", (int)key.mv_size, (char *)key.mv_data, mdb_strerror(rc));
                 error_shutdown();
             }
             if (cs != current->checksum) {
@@ -381,6 +386,11 @@ static void perform_updates(MDB_txn *wtxn, ltxn_t *ltxn, uintptr_t shared_memory
 static void perform_queued_commits() {
     if (!queued_commit_count) return; // Nothing to process
 
+    int raced = 0, success = 0, notified=0;
+    struct timespec start, commit, end;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     // Start a wtxn
     MDB_txn *wtxn;
     int rc = mdb_txn_begin(dbenv, NULL, 0, &wtxn);
@@ -399,24 +409,22 @@ static void perform_queued_commits() {
         error_shutdown();
     }
 
-    LOG("Processing %d queued commits\n", queued_commit_count);
-
     // Process all queued ltxns
     for(int i=0; i<queued_commit_count; i++) {
         ltxn_t *ltxn = queued_commits[i].ltxn;
-
         if (ltxn->state == TRANSACTION_COMMITTING) {
             int client_fd = queued_commits[i].client_fd;
             uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
-            LOG("Processing ltxn %p for client pid=%d", ltxn, clients[client_fd].pid);
             if (validate_reads(wtxn, ltxn, shared_memory_displacement, validation_cursor)) {
-                LOG("Committing ltxn %p for client pid=%d\n", ltxn, clients[client_fd].pid);
                 perform_updates(wtxn, ltxn, shared_memory_displacement);
             } else {
                 ltxn->state = TRANSACTION_RACED;
+                raced++;
             }
         }
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &commit);
 
     // Commit the wtxn
     rc = mdb_txn_commit(wtxn);
@@ -433,6 +441,7 @@ static void perform_queued_commits() {
         // If the transaction wasn't marked as raced, it has succeeded!
         if (ltxn->state == TRANSACTION_COMMITTING) {
             ltxn->state = TRANSACTION_SUCCEEDED; // Mark transaction as succeeded
+            success++;
         }
     }
 
@@ -446,9 +455,15 @@ static void perform_queued_commits() {
         if (clients[client_fd].waiting_for_signal) {
             send(client_fd, "s", 1, 0); // Signal that one or multiple commits have been processed
             clients[client_fd].waiting_for_signal = 0;
+            notified++;
         }
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &end);
     queued_commit_count = 0;
+
+    LOG("Processed %d succeeded and %d raced commits for %d clients in %lld ms (including %lld ms for commit)", success, raced, notified, 
+        (end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000,
+        (end.tv_sec - commit.tv_sec) * 1000 + (end.tv_nsec - commit.tv_nsec) / 1000000);
 }
 

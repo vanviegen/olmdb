@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "async_hooks";
-import * as lowlevel from "./lowlevel";
-const { DatabaseError } = lowlevel;
+import * as lowlevel from "./lowlevel.js";
+import { assert } from "console";
+export const { DatabaseError } = lowlevel;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -41,22 +42,26 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
     } else {
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
-        if (txn.retryCount > 3) {
+        if (txn.retryCount > 4) {
             txn.reject(new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
         } else {
-            console.log(`Retrying failed transaction (${txn.retryCount}/3)`);
-            try_transaction(txn); // Retry the transaction
+            console.log(`Retrying raced transaction (${txn.retryCount}/4)`);
+            tryTransaction(txn); // Retry the transaction
         }
     }
 }
 
-async function try_transaction(txn: Transaction) {
+async function tryTransaction(txn: Transaction) {
     txn.id = lowlevel.startTransaction();
+    assert(txn.id >= 0, "Transaction ID should be valid 1");
     pendingTransactions.set(txn.id, txn);
     
     transactionStorage.run(txn, async () => {
+        assert(txn.id >= 0, "Transaction ID should be valid 2");
         try {
+            assert(txn.id >= 0, "Transaction ID should be valid 2a");
             txn.result = await txn.fn();
+            assert(txn.id >= 0, "Transaction ID should be valid 2b");
         } catch(err) {
             lowlevel.abortTransaction(txn.id);
             pendingTransactions.delete(txn.id);
@@ -64,7 +69,8 @@ async function try_transaction(txn: Transaction) {
             txn.reject(err);
             return;
         }
-        
+
+        assert(txn.id >= 0, "Transaction ID should be valid 3");
         const immediateCommit = lowlevel.commitTransaction(txn.id);
         if (immediateCommit) {
             // Read-only transaction completed immediately
@@ -177,8 +183,8 @@ export function del(key: Data): void {
  * ```
  */
 export function init(dbDir?: string): void {
-    lowlevel.init(globalCommitHandler, dbDir);
     isInitialized = true;
+    lowlevel.init(globalCommitHandler, dbDir);
 }
 
 /**
@@ -218,7 +224,7 @@ export function transact<T>(fn: () => T): Promise<T> {
     }
     
     return new Promise((resolve, reject) => {
-        try_transaction({fn, resolve, reject, retryCount: 0, id: -1});
+        tryTransaction({fn, resolve, reject, retryCount: 0, id: -1});
     });
 }
 
@@ -234,8 +240,14 @@ export interface DbEntry<K,V> {
  * Database iterator that implements the standard TypeScript iterator protocol
  */
 export class DbIterator<K,V> extends Iterator<DbEntry<K,V>,undefined> implements Iterator<DbEntry<K,V>,undefined> {
-    constructor(private iteratorId: number, private convertKey: (buffer: ArrayBuffer) => K, private convertValue: (buffer: ArrayBuffer) => V) {
+    private iteratorId: number;
+    private convertKey: (buffer: ArrayBuffer) => K;
+    private convertValue: (buffer: ArrayBuffer) => V;
+    constructor(iteratorId: number, convertKey: (buffer: ArrayBuffer) => K, convertValue: (buffer: ArrayBuffer) => V) {
         super();
+        this.iteratorId = iteratorId;
+        this.convertKey = convertKey;
+        this.convertValue = convertValue;
     }
     
     [Symbol.iterator](): DbIterator<K,V> {

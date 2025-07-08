@@ -1,7 +1,14 @@
 import { fork } from 'child_process';
+import { fileURLToPath } from 'url';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as olmdb from 'olmdb';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function parseArgs() {
     const args = process.argv.slice(2);
@@ -9,11 +16,12 @@ function parseArgs() {
         gets_per_transaction: 2,
         puts_per_transaction: 1,
         threads: 8,
-        tasks_per_thread: 16,
-        value_size: 1000,
+        tasks_per_thread: 128,
+        value_size: 100,
         key_count: 100000,
         db_dir: "./.olmdb_benchmark",
-        duration: 15, // seconds
+        duration: 10, // seconds
+        delay: 0,
     };
 
     for (let i = 0; i < args.length; i++) {
@@ -43,9 +51,9 @@ async function main() {
     }
 
     // Open database and create initial data
-    olmdb.open(options.db_dir);
+    olmdb.init(options.db_dir);
     console.warn('Populating database...');
-    const value = new Uint8Array(options.value_size).fill('x'.charCodeAt(0));
+    const value = new Uint8Array(options.value_size).fill('i'.charCodeAt(0));
     let cnt = 0;
     while(cnt < options.key_count) {
         // Max 10000 keys per transaction
@@ -56,36 +64,42 @@ async function main() {
             }
         });
     }
-    console.warn('Database populated with initial data.');
 
-    let totalTransactions = 0;
-    let totalRetries = 0;
+    if (options.delay > 0) {
+        console.warn(`Waiting ${options.delay} seconds before starting benchmark...`);
+        await sleep(options.delay * 1000);
+    }
+
+    let totals = {transactions: 0, retries: 0};
 
     const resultPromises: Promise<any>[] = [];
     console.warn(`Starting ${options.threads} threads with ${options.tasks_per_thread} tasks each for ${options.duration} seconds...`);
-    for (let i = 0; i < options.threads; i++) {
-        const worker = fork(path.resolve(__dirname, 'worker.ts'));
-        resultPromises.push(new Promise((resolve, reject) => {
-            worker.on('message', (result: any) => {
-                totalTransactions += result.transactions;
-                totalRetries += result.retries;
-                resolve(result);
-            });
-            worker.on('error', reject);
-            worker.on('exit', (code) => {
-                if (code !== 0) {
-                    reject(new Error(`Worker stopped with exit code ${code}`));
-                }
-            });
-            worker.send(options);
-        }));
+    const workerPath = path.resolve(__dirname, 'worker.ts');
+    if (options.threads > 1) {
+        for (let i = 0; i < options.threads; i++) {
+            const worker = fork(workerPath);
+            resultPromises.push(new Promise((resolve, reject) => {
+                worker.on('message', (result: any) => {
+                    totals.transactions += result.transactions;
+                    totals.retries += result.retries;
+                    resolve(result);
+                });
+                worker.on('error', reject);
+                worker.on('exit', (code) => {
+                    if (code !== 0) {
+                        reject(new Error(`Worker stopped with exit code ${code}`));
+                    }
+                });
+                worker.send(options);
+            }));
+        }
+        await Promise.all(resultPromises);
+    } else {
+        const {run} = await import(workerPath);
+        totals = await run(options);
     }
-    await Promise.all(resultPromises);
 
-    console.log(JSON.stringify({
-        transactions: totalTransactions,
-        retries: totalRetries,
-    }));
+    console.log(JSON.stringify(totals));
 }
 
 main().catch(console.error);

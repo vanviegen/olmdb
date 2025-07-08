@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "common.h"
 
 /**
  * @struct commit_result_t
@@ -192,21 +191,41 @@ int read_iterator(int iterator_id,
 int close_iterator(int iterator_id);
 
 /**
+ * @brief Receive and discard all messages available on the commit worker file descriptor.
+ * 
+ * When using something like `poll()` or `select()` to monitor the commit worker file descriptor,
+ * this function should be called to drain the file descriptor and to make sure the worker
+ * connection is still healthy (and reconnect if necessary).
+ * 
+ * Alternatively, this function can be used in blocking mode (presumably in a secondary thread)
+ * to wait until data is available on the commit worker file descriptor.
+ * 
+ * When this functions signals that data has been read, you would normally call `get_commit_results()`
+ * to retrieve the results of completed transaction commits.
+ *
+ * @param blocking  If non-zero, block until results are available. Otherwise, return immediately if
+ *   no results are available.
+ * @return 1: Data was read from the commit worker file descriptor.
+ *         0: No data was available for immediate read in non-blocking mode, or the commit worker
+ *   connection was lost and a new connection could not be established.
+ */
+
+int drain_signal_fd(int blocking);
+
+/**
  * @brief Get results of completed asynchronous transaction commits.
  *
  * This function should be called periodically or when data is available on the commit worker file descriptor
  * to retrieve the status of completed transaction commits.
  * 
  * @param results      Array to store commit results.
- * @param max_results  Maximum number of results to retrieve.
+ * @param result_count Input: Maximum number of results to return. Output: Actual number of results returned.
  * 
- * @return >0: Number of results returned (at most max_results).
- *          0: No results available yet, but transactions are still being committed.
- *         -1: No results available and no more transactions are being committed.
- * 
- * If the commit worker connection is lost, it will attempt to reconnect automatically.
+ * @return  0: No more transactions are being committed.
+ *          1: Call again later, as more transactions are being committed.
+ *          2: Call again now, as there are more results ready than fit in the buffer.
  */
-int get_commit_results(commit_result_t *results, int max_results);
+int get_commit_results(commit_result_t *results, int *result_count);
 
 /**
  * Global error message buffer, set when functions return failure codes.

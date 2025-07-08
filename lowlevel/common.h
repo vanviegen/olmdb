@@ -7,7 +7,6 @@
 #include "../vendor/lmdb/lmdb.h"
 
 #define SKIPLIST_DEPTH 4 // Number of levels in the skiplist
-#define LOG_BUFFER_BLOCK_SIZE (64 * 1024)
 
 // For use by our checksum hash function (simple FNV-1a)
 #define CHECKSUM_INITIAL 0xcbf29ce484222325ULL
@@ -41,7 +40,9 @@
 
 #define SET_LMDB_ERROR(action, rc, ...) \
     do { \
-        SET_ERROR("LMDB" #rc, "LMDB " action " failed (%s)", ##__VA_ARGS__, mdb_strerror(rc)); \
+        char code[16]; \
+        snprintf(code, sizeof(code), "LMDB%d", rc); \
+        SET_ERROR(code, "LMDB " action " failed (%s)", ##__VA_ARGS__, mdb_strerror(rc)); \
     } while(0)
 
 typedef struct {
