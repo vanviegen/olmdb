@@ -23,13 +23,13 @@ int init_lmdb(const char *db_dir) {
         return -1;
     }
     
-    // rc = mdb_env_set_maxreaders(dbenv, 126);
-    // if (rc != MDB_SUCCESS) {
-    //     mdb_env_close(dbenv);
-    //     dbenv = NULL;
-    //     SET_LMDB_ERROR("set max readers", rc);
-    //     return -1;
-    // }
+    rc = mdb_env_set_maxreaders(dbenv, 196);
+    if (rc != MDB_SUCCESS) {
+        mdb_env_close(dbenv);
+        dbenv = NULL;
+        SET_LMDB_ERROR("set max readers", rc);
+        return -1;
+    }
     
     rc = mdb_env_open(dbenv, db_dir, MDB_NOTLS, 0664);
     if (rc != MDB_SUCCESS) {

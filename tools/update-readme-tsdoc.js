@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
-import fs from 'fs/promises';
-import path from 'path';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { buildDocumentation, documentationToMarkdown } from 'tsdoc-markdown';
 import { fileURLToPath } from 'url';
-import {buildDocumentation, documentationToMarkdown} from 'tsdoc-markdown';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// @ts-ignore
+if (typeof __dirname === 'undefined') global.__dirname = (typeof import.meta === 'undefined') ? process.cwd() : path.dirname(fileURLToPath(import.meta.url));
+
 const projectRoot = path.resolve(__dirname, '..');
 
 /**

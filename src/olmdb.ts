@@ -42,10 +42,10 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
     } else {
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
-        if (txn.retryCount > 4) {
+        if (txn.retryCount > 100) {
             txn.reject(new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
         } else {
-            console.log(`Retrying raced transaction (${txn.retryCount}/4)`);
+            console.log(`Retrying raced transaction (${txn.retryCount}/10)`);
             tryTransaction(txn); // Retry the transaction
         }
     }

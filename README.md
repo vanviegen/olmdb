@@ -223,6 +223,23 @@ What this demonstrates is a race condition, gracefully handled by a retry:
 OLMDB retries a transaction 4 times before giving up (and throwing an exception).
 
 
+## Performance
+
+Performance seems to be predictably strong, for various loads and data sizes.
+
+To get some idea, on my mediocre laptop with a store prefilled with 1 million values of 100 bytes each, I get: 
+
+1) 1 read + 0 writes per txn, 1 process, 1 task per process: 420,000 txn/s.
+2) 1 read + 0 writes per txn, 16 processes, 1 task per process: 2,495,000 txn/s.
+3) 10 reads + 0 writes per txn, 1 process, 1 task per process: 67,000 txn/s.
+4) 10 reads + 0 writes per txn, 16 processes, 1 task per process: 403,000 txn/s.
+5) 10 reads + 2 writes per txn, 1 process, 1 task per process: 100 txn/s.
+6) 10 reads + 2 writes per txn, 1 process, 1000 tasks per process: 6,000 txn/s.
+7) 10 reads + 2 writes per txn, 16 processes, 1000 tasks per process: 16,000 txn/s.
+
+Scaling up the number of tasks per process wouldn't improve performance for read-only transactions, as they're fully synchronous anyway. The performance for 5) is pretty bad, but as expected, as each transaction requires a full sync() to disk (apparently taking about 10ms on my system) before starting the next transaction.
+
+
 ## Architecture
 
 ### Components
