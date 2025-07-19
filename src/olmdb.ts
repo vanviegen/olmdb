@@ -79,50 +79,62 @@ async function tryTransaction(txn: Transaction) {
     assert(txn.id >= 0, "Transaction ID should be valid 1");
     pendingTransactions.set(txn.id, txn);
     
-    transactionStorage.run(txn, async () => {
+    let error: any = null;
+    let immediateCommit = false;
+    
+    await transactionStorage.run(txn, async () => {
         assert(txn.id >= 0, "Transaction ID should be valid 2");
         try {
             assert(txn.id >= 0, "Transaction ID should be valid 2a");
             txn.result = await txn.fn();
             assert(txn.id >= 0, "Transaction ID should be valid 2b");
         } catch(err) {
-            lowlevel.abortTransaction(txn.id);
-            pendingTransactions.delete(txn.id);
-            txn.id = -1; // Mark as done
-            
-            // Execute onRevert callbacks outside transaction context
-            for (const callback of txn.onRevertCallbacks) {
-                try {
-                    callback();
-                } catch (callbackErr) {
-                    console.error(callbackErr);
-                }
-            }
-            
-            txn.reject(err);
+            error = err;
             return;
         }
 
         assert(txn.id >= 0, "Transaction ID should be valid 3");
-        const immediateCommit = lowlevel.commitTransaction(txn.id);
-        if (immediateCommit) {
-            // Read-only transaction completed immediately
-            pendingTransactions.delete(txn.id);
-            txn.id = -1;
-            
-            // Execute onCommit callbacks outside transaction context
-            for (const callback of txn.onCommitCallbacks) {
-                try {
-                    callback();
-                } catch (callbackErr) {
-                    console.error(callbackErr);
-                }
-            }
-            
-            txn.resolve(txn.result);
-        }
-        // Otherwise, globalCommitHandler will be called later
+        immediateCommit = lowlevel.commitTransaction(txn.id);
+        // Note: Don't execute callbacks here as we're still within transaction context
     });
+    
+    // Handle error case outside transaction context
+    if (error) {
+        lowlevel.abortTransaction(txn.id);
+        pendingTransactions.delete(txn.id);
+        txn.id = -1; // Mark as done
+        
+        // Execute onRevert callbacks outside transaction context
+        for (const callback of txn.onRevertCallbacks) {
+            try {
+                callback();
+            } catch (callbackErr) {
+                console.error(callbackErr);
+            }
+        }
+        
+        txn.reject(error);
+        return;
+    }
+    
+    // Handle immediate commit case outside transaction context
+    if (immediateCommit) {
+        // Read-only transaction completed immediately
+        pendingTransactions.delete(txn.id);
+        txn.id = -1;
+        
+        // Execute onCommit callbacks outside transaction context
+        for (const callback of txn.onCommitCallbacks) {
+            try {
+                callback();
+            } catch (callbackErr) {
+                console.error(callbackErr);
+            }
+        }
+        
+        txn.resolve(txn.result);
+    }
+    // Otherwise, globalCommitHandler will be called later
 }
 
 const transactionStorage = new AsyncLocalStorage<Transaction|undefined>();
