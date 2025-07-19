@@ -382,6 +382,34 @@ init("./my-database");
 ```
 
 
+### onRevert
+
+Registers a callback to be executed when the current transaction is reverted (aborted due to error).
+The callback will be executed outside of transaction context.
+
+| Function | Type |
+| ---------- | ---------- |
+| `onRevert` | `(callback: () => void) => void` |
+
+Parameters:
+
+* `callback`: - Function to execute when transaction is reverted
+
+
+### onCommit
+
+Registers a callback to be executed when the current transaction commits successfully.
+The callback will be executed outside of transaction context.
+
+| Function | Type |
+| ---------- | ---------- |
+| `onCommit` | `(callback: () => void) => void` |
+
+Parameters:
+
+* `callback`: - Function to execute when transaction commits
+
+
 ### transact
 
 Executes a function within a database transaction context.

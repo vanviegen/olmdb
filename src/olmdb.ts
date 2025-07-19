@@ -19,6 +19,8 @@ interface Transaction {
     id: number;
     result?: any;
     retryCount: number;
+    onCommitCallbacks: Array<() => void>;
+    onRevertCallbacks: Array<() => void>;
 }
 
 // Track pending transactions by ID
@@ -38,8 +40,29 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
     txn.id = -1; // Mark as done
     
     if (success) {
+        // Execute onCommit callbacks outside transaction context
+        for (const callback of txn.onCommitCallbacks) {
+            try {
+                callback();
+            } catch (callbackErr) {
+                console.error(callbackErr);
+            }
+        }
+        
         txn.resolve(txn.result);
     } else {
+        // Execute onRevert callbacks for retry failure
+        for (const callback of txn.onRevertCallbacks) {
+            try {
+                callback();
+            } catch (callbackErr) {
+                console.error(callbackErr);
+            }
+        }
+        // Clear callbacks lists as the new run may set new ones
+        txn.onRevertCallbacks = [];
+        txn.onCommitCallbacks = [];
+        
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
         if (txn.retryCount > 100) {
@@ -66,6 +89,16 @@ async function tryTransaction(txn: Transaction) {
             lowlevel.abortTransaction(txn.id);
             pendingTransactions.delete(txn.id);
             txn.id = -1; // Mark as done
+            
+            // Execute onRevert callbacks outside transaction context
+            for (const callback of txn.onRevertCallbacks) {
+                try {
+                    callback();
+                } catch (callbackErr) {
+                    console.error(callbackErr);
+                }
+            }
+            
             txn.reject(err);
             return;
         }
@@ -76,6 +109,16 @@ async function tryTransaction(txn: Transaction) {
             // Read-only transaction completed immediately
             pendingTransactions.delete(txn.id);
             txn.id = -1;
+            
+            // Execute onCommit callbacks outside transaction context
+            for (const callback of txn.onCommitCallbacks) {
+                try {
+                    callback();
+                } catch (callbackErr) {
+                    console.error(callbackErr);
+                }
+            }
+            
             txn.resolve(txn.result);
         }
         // Otherwise, globalCommitHandler will be called later
@@ -188,6 +231,30 @@ export function init(dbDir?: string): void {
 }
 
 /**
+ * Registers a callback to be executed when the current transaction is reverted (aborted due to error).
+ * The callback will be executed outside of transaction context.
+ * 
+ * @param callback - Function to execute when transaction is reverted
+ * @throws {TypeError} If called outside of a transaction context
+ */
+export function onRevert(callback: () => void): void {
+    const transaction = getTransaction();
+    transaction.onRevertCallbacks.push(callback);
+}
+
+/**
+ * Registers a callback to be executed when the current transaction commits successfully.
+ * The callback will be executed outside of transaction context.
+ * 
+ * @param callback - Function to execute when transaction commits
+ * @throws {TypeError} If called outside of a transaction context
+ */
+export function onCommit(callback: () => void): void {
+    const transaction = getTransaction();
+    transaction.onCommitCallbacks.push(callback);
+}
+
+/**
  * Executes a function within a database transaction context.
  * 
  * All database operations (get, put, del) must be performed within a transaction.
@@ -224,7 +291,15 @@ export function transact<T>(fn: () => T): Promise<T> {
     }
     
     return new Promise((resolve, reject) => {
-        tryTransaction({fn, resolve, reject, retryCount: 0, id: -1});
+        tryTransaction({
+            fn, 
+            resolve, 
+            reject, 
+            retryCount: 0, 
+            id: -1,
+            onCommitCallbacks: [],
+            onRevertCallbacks: []
+        });
     });
 }
 
