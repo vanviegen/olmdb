@@ -1,20 +1,32 @@
 #!/usr/bin/env sh
 set -e # Exit on error
 
-# Try to find Node.js headers in common locations
-NODE_INCLUDE=$(node -p "process.config.variables.node_prefix + '/include/node'")
+# Try to find Node.js headers using multiple strategies
+NODE_PREFIX=$(node -p "
+  const path = require('path');
+  const prefix = process.config.variables.node_prefix || 
+                 process.env.NODE_PREFIX || 
+                 process.env.NPM_CONFIG_PREFIX ||
+                 path.dirname(process.execPath);
+  // If prefix is root ('/'), try the parent of execPath as base
+  prefix === '/' ? path.dirname(path.dirname(process.execPath)) : prefix;
+")
+
+# Check for headers in the determined prefix
+NODE_INCLUDE="$NODE_PREFIX/include/node"
 if [ ! -f "$NODE_INCLUDE/node_api.h" ]; then
-    # Fallback to common paths
-    if [ -f "/usr/local/include/node/node_api.h" ]; then
-        NODE_INCLUDE="/usr/local/include/node"
-    elif [ -f "/usr/include/node/node_api.h" ]; then
-        NODE_INCLUDE="/usr/include/node"
-    else
+    # Try alternative include structure
+    NODE_INCLUDE="$NODE_PREFIX/include"
+    if [ ! -f "$NODE_INCLUDE/node_api.h" ]; then
         echo "Error: Could not find Node.js headers (node_api.h)" >&2
+        echo "Node prefix: $NODE_PREFIX" >&2
         echo "Searched in:" >&2
-        echo "  $NODE_INCLUDE" >&2
-        echo "  /usr/local/include/node" >&2
-        echo "  /usr/include/node" >&2
+        echo "  $NODE_PREFIX/include/node" >&2
+        echo "  $NODE_PREFIX/include" >&2
+        echo "Environment variables:" >&2
+        echo "  NODE_PATH: ${NODE_PATH:-not set}" >&2
+        echo "  NODE_PREFIX: ${NODE_PREFIX:-not set}" >&2
+        echo "  NPM_CONFIG_PREFIX: ${NPM_CONFIG_PREFIX:-not set}" >&2
         exit 1
     fi
 fi
