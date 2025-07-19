@@ -45,24 +45,27 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
             try {
                 callback();
             } catch (callbackErr) {
-                console.warn("Error in onCommit callback:", callbackErr);
+                console.error(callbackErr);
             }
         }
         
         txn.resolve(txn.result);
     } else {
+        // Execute onRevert callbacks for retry failure
+        for (const callback of txn.onRevertCallbacks) {
+            try {
+                callback();
+            } catch (callbackErr) {
+                console.error(callbackErr);
+            }
+        }
+        // Clear callbacks lists as the new run may set new ones
+        txn.onRevertCallbacks = [];
+        txn.onCommitCallbacks = [];
+        
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
         if (txn.retryCount > 100) {
-            // Execute onRevert callbacks for final failure
-            for (const callback of txn.onRevertCallbacks) {
-                try {
-                    callback();
-                } catch (callbackErr) {
-                    console.warn("Error in onRevert callback:", callbackErr);
-                }
-            }
-            
             txn.reject(new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
         } else {
             console.log(`Retrying raced transaction (${txn.retryCount}/10)`);
@@ -92,7 +95,7 @@ async function tryTransaction(txn: Transaction) {
                 try {
                     callback();
                 } catch (callbackErr) {
-                    console.warn("Error in onRevert callback:", callbackErr);
+                    console.error(callbackErr);
                 }
             }
             
@@ -112,7 +115,7 @@ async function tryTransaction(txn: Transaction) {
                 try {
                     callback();
                 } catch (callbackErr) {
-                    console.warn("Error in onCommit callback:", callbackErr);
+                    console.error(callbackErr);
                 }
             }
             
