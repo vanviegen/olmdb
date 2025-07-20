@@ -1,4 +1,4 @@
-import { init, put, get, getString, transact, del, scan, asString, DatabaseError } from '../dist/olmdb.js';
+import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit } from '../dist/olmdb.js';
 import { expect, test, describe, beforeEach } from "@jest/globals";
 
 try {
@@ -498,6 +498,172 @@ describe('LMDB', () => {
         await Promise.all(promises);
         transact(() => expect(scan().toArray().length).toBe(25));
     })
+
+    describe('onCommit and onRevert callbacks', () => {
+        test('should execute onCommit callback when transaction succeeds', async () => {
+            let callbackExecuted = false;
+            let callbackValue = '';
+            
+            await transact(() => {
+                put('callback-test', 'test-value');
+                onCommit(() => {
+                    callbackExecuted = true;
+                    callbackValue = 'commit-executed';
+                });
+            });
+            
+            expect(callbackExecuted).toBe(true);
+            expect(callbackValue).toBe('commit-executed');
+        });
+        
+        test('should execute onRevert callback when transaction fails', async () => {
+            let callbackExecuted = false;
+            let callbackValue = '';
+            
+            await expect(transact(() => {
+                put('revert-test', 'test-value');
+                onRevert(() => {
+                    callbackExecuted = true;
+                    callbackValue = 'revert-executed';
+                });
+                throw new Error('Test error');
+            })).rejects.toThrow('Test error');
+            
+            expect(callbackExecuted).toBe(true);
+            expect(callbackValue).toBe('revert-executed');
+        });
+        
+        test('should allow nested transact calls in onCommit callback', async () => {
+            let nestedPromise;
+            await transact(() => {
+                put('main-key', 'main-value');
+                onCommit(() => {
+                    // This should work - callbacks run outside transaction context
+                    nestedPromise = transact(() => {
+                        put('nested-key', 'nested-value');
+                    });
+                });
+            });
+
+            // Wait for nested transaction to complete
+            await nestedPromise;
+                        
+            // Verify both keys were set
+            const mainValue = await transact(() => getString('main-key'));
+            const nestedValue = await transact(() => getString('nested-key'));
+            expect(mainValue).toBe('main-value');
+            expect(nestedValue).toBe('nested-value');
+        });
+        
+        test('should allow nested transact calls in onRevert callback', async () => {
+            let nestedPromise;
+            
+            await expect(transact(() => {
+                put('revert-main-key', 'main-value');
+                onRevert(() => {
+                    // This should work - callbacks run outside transaction context
+                    nestedPromise = transact(() => {
+                        put('revert-nested-key', 'nested-value');
+                    });
+                });
+                throw new Error('Intentional error');
+            })).rejects.toThrow('Intentional error');
+
+            await nestedPromise;
+
+            // Verify main transaction was reverted but nested succeeded
+            const mainValue = await transact(() => getString('revert-main-key'));
+            const nestedValue = await transact(() => getString('revert-nested-key'));
+            expect(mainValue).toBeUndefined(); // Main transaction was reverted
+            expect(nestedValue).toBe('nested-value'); // Nested transaction succeeded
+        });
+        
+        test('should execute multiple callbacks in order', async () => {
+            const executionOrder: string[] = [];
+            
+            await transact(() => {
+                put('multi-callback-test', 'value');
+                onCommit(() => {
+                    executionOrder.push('first');
+                });
+                onCommit(() => {
+                    executionOrder.push('second');
+                });
+                onCommit(() => {
+                    executionOrder.push('third');
+                });
+            });
+            
+            expect(executionOrder).toEqual(['first', 'second', 'third']);
+        });
+        
+        test('should handle errors in callbacks gracefully', async () => {
+            let successCallbackExecuted = false;
+            let errorShown = false;
+
+            const originalConsoleError = console.error;
+            console.error = () => {
+                errorShown = true;
+            };
+
+            try {
+                await transact(() => {
+                    put('error-callback-test', 'value');
+                    onCommit(() => {
+                        throw new Error('Callback error');
+                    });
+                    onCommit(() => {
+                        successCallbackExecuted = true;
+                    });
+                });
+            } finally {
+                console.error = originalConsoleError; // Restore console.error
+            }
+            
+            // The second callback should still execute despite first one failing
+            expect(successCallbackExecuted).toBe(true);
+            expect(errorShown).toBe(true);
+            
+            // The transaction should still succeed
+            const value = await transact(() => getString('error-callback-test'));
+            expect(value).toBe('value');
+        });
+        
+        test('should throw error when calling onCommit outside transaction', () => {
+            expect(() => {
+                onCommit(() => {});
+            }).toThrow('should be performed within in a transact');
+        });
+        
+        test('should throw error when calling onRevert outside transaction', () => {
+            expect(() => {
+                onRevert(() => {});
+            }).toThrow('should be performed within in a transact');
+        });
+        
+        test('should call onRevert on every retry and clear callbacks', async () => {
+            // This test is conceptual since it's hard to force retries in test environment
+            // But it verifies the callback clearing behavior
+            let revertCount = 0;
+            
+            await expect(transact(() => {
+                // Register a callback that increments counter
+                onRevert(() => {
+                    revertCount++;
+                });
+                
+                // Register multiple callbacks to test clearing
+                onRevert(() => {
+                    // This should also execute
+                });
+                
+                throw new Error('Force revert');
+            })).rejects.toThrow('Force revert');
+            
+            // Callbacks should have been called
+            expect(revertCount).toBe(1);
+        });
+    });
 
 });
 

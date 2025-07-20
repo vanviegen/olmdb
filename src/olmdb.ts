@@ -19,6 +19,22 @@ interface Transaction {
     id: number;
     result?: any;
     retryCount: number;
+    onCommitCallbacks?: Array<() => void>;
+    onRevertCallbacks?: Array<() => void>;
+}
+
+function runCallbacks(txn: Transaction, callbackList: "onCommitCallbacks" | "onRevertCallbacks") {
+    if (txn[callbackList]) {
+        for (const callback of txn[callbackList]) {
+            try {
+                callback();
+            } catch (err) {
+                console.error(err);
+            }
+        }
+    }
+    delete txn.onCommitCallbacks;
+    delete txn.onRevertCallbacks;
 }
 
 // Track pending transactions by ID
@@ -38,8 +54,14 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
     txn.id = -1; // Mark as done
     
     if (success) {
+        // Execute onCommit callbacks outside transaction context
+        runCallbacks(txn, "onCommitCallbacks");
+        
         txn.resolve(txn.result);
     } else {
+        // Execute onRevert callbacks for retry failure
+        runCallbacks(txn, "onRevertCallbacks");
+        
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
         if (txn.retryCount > 100) {
@@ -56,30 +78,38 @@ async function tryTransaction(txn: Transaction) {
     assert(txn.id >= 0, "Transaction ID should be valid 1");
     pendingTransactions.set(txn.id, txn);
     
-    transactionStorage.run(txn, async () => {
+    let error: any = null;
+    let immediateCommit = false;
+    
+    await transactionStorage.run(txn, async () => {
         assert(txn.id >= 0, "Transaction ID should be valid 2");
         try {
             assert(txn.id >= 0, "Transaction ID should be valid 2a");
             txn.result = await txn.fn();
             assert(txn.id >= 0, "Transaction ID should be valid 2b");
         } catch(err) {
+            error = err;
             lowlevel.abortTransaction(txn.id);
-            pendingTransactions.delete(txn.id);
-            txn.id = -1; // Mark as done
-            txn.reject(err);
             return;
         }
 
         assert(txn.id >= 0, "Transaction ID should be valid 3");
-        const immediateCommit = lowlevel.commitTransaction(txn.id);
-        if (immediateCommit) {
-            // Read-only transaction completed immediately
-            pendingTransactions.delete(txn.id);
-            txn.id = -1;
+        immediateCommit = lowlevel.commitTransaction(txn.id);
+        // Note: Don't execute callbacks here as we're still within transaction context
+    });
+    
+    if (error || immediateCommit) {        
+        pendingTransactions.delete(txn.id);
+        txn.id = -1;
+        if (error) {
+            runCallbacks(txn, "onRevertCallbacks");
+            txn.reject(error);
+        } else {
+            runCallbacks(txn, "onCommitCallbacks");        
             txn.resolve(txn.result);
         }
-        // Otherwise, globalCommitHandler will be called later
-    });
+    }
+    // else: globalCommitHandler will be called later
 }
 
 const transactionStorage = new AsyncLocalStorage<Transaction|undefined>();
@@ -188,6 +218,30 @@ export function init(dbDir?: string): void {
 }
 
 /**
+ * Registers a callback to be executed when the current transaction is reverted (aborted due to error).
+ * The callback will be executed outside of transaction context.
+ * 
+ * @param callback - Function to execute when transaction is reverted
+ * @throws {TypeError} If called outside of a transaction context
+ */
+export function onRevert(callback: () => void): void {
+    const transaction = getTransaction();
+    (transaction.onRevertCallbacks ||= []).push(callback);
+}
+
+/**
+ * Registers a callback to be executed when the current transaction commits successfully.
+ * The callback will be executed outside of transaction context.
+ * 
+ * @param callback - Function to execute when transaction commits
+ * @throws {TypeError} If called outside of a transaction context
+ */
+export function onCommit(callback: () => void): void {
+    const transaction = getTransaction();
+    (transaction.onCommitCallbacks ||= []).push(callback);
+}
+
+/**
  * Executes a function within a database transaction context.
  * 
  * All database operations (get, put, del) must be performed within a transaction.
@@ -224,7 +278,13 @@ export function transact<T>(fn: () => T): Promise<T> {
     }
     
     return new Promise((resolve, reject) => {
-        tryTransaction({fn, resolve, reject, retryCount: 0, id: -1});
+        tryTransaction({
+            fn, 
+            resolve, 
+            reject, 
+            retryCount: 0, 
+            id: -1
+        });
     });
 }
 
