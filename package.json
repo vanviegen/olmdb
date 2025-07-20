@@ -19,7 +19,9 @@
     "dist",
     "binding.gyp",
     "vendor",
-    "lowlevel"
+    "lowlevel",
+    "AI_CONTRIBUTING.md",
+    "ARCHITECTURE.md"
   ],
   "scripts": {
     "build": "rm -rf dist ; tsc",
