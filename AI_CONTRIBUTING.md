@@ -2,121 +2,162 @@
 
 **⚠️ Important: Keep this file updated when making architectural changes!**
 
-This guide provides essential information for AI assistants contributing to OLMDB. It focuses on architectural highlights and key development information to enable efficient contributions without requiring full project analysis each time.
+This guide provides essential information for AI assistants contributing to OLMDB. It focuses on understanding the codebase structure and how to modify the library effectively.
 
 ## Project Overview
 
-OLMDB is a high-performance embedded key-value store that combines LMDB's speed with optimistic concurrency control. Key characteristics:
+OLMDB is a high-performance embedded key-value store that combines LMDB's speed with optimistic concurrency control. For usage examples, see README.md.
 
-- **Performance**: Built on LMDB with zero-copy data access and batched commits
-- **Concurrency**: Optimistic locking with automatic transaction retries
-- **Platform**: Currently Linux-only (contributions for other platforms welcome)
-- **Languages**: TypeScript/JavaScript API over native C components
-- **Runtime**: Supports Node.js 14+ and Bun
+**Key Architecture**: 5-layer design from TypeScript API down to LMDB with optimistic transactions
 
-## Architecture Overview
+## Code Organization & File Purposes
 
-OLMDB has a 5-layer architecture (see README.md "Architecture" section for details):
+### TypeScript Layer (`src/`)
 
-1. **High-level TypeScript API** (`src/olmdb.ts`) - Main user-facing API with `transact()`, `put()`, `get()`, etc.
-2. **Low-level TypeScript API** (`src/lowlevel.ts`) - Loads and exposes the NAPI module API
-3. **NAPI module** (`lowlevel/napi.c`) - JavaScript-C bridge for database operations
-4. **OLMDB client library** (`lowlevel/transaction_client.c`) - Core optimistic transaction logic
-5. **Commit worker daemon** (`lowlevel/commit_worker.c`) - Background process handling write commits
+**`src/olmdb.ts`** - High-level user-facing API
+- Exports main functions: `transact()`, `put()`, `get()`, `del()`, `list()`, `init()`  
+- Manages AsyncLocalStorage context for transaction isolation
+- Handles automatic transaction retries (up to 3 attempts) on validation failures
+- Tracks pending transactions via Map and coordinates with commit callbacks
+- Implements `onCommit`/`onRevert` callback system for transaction lifecycle
+- Uses TextEncoder/TextDecoder for string <-> Uint8Array conversion
 
-### Key Files and Directories
+**`src/lowlevel.ts`** - Native module loader and bridge
+- Uses `dlopen()` to load `transaction_client.node` native module
+- Exposes core native functions: `init()`, `startTransaction()`, `commit()`, `get()`, `put()`, etc.
+- Handles binary path resolution (`OLMDB_BIN_DIR` environment variable)
+- Provides TypeScript type definitions for native function signatures
 
+### Native C Layer (`lowlevel/`)
+
+**`lowlevel/napi.c`** - N-API bridge between JavaScript and C
+- Implements Node.js N-API bindings for all database operations
+- Manages JavaScript callback references (especially `onCommit` callback)
+- Handles marshalling between JavaScript values and C data structures
+- Implements async work queues for commit result delivery from background daemon
+- Error handling: translates C errors to JavaScript `DatabaseError` exceptions
+
+**`lowlevel/transaction_client.c`** - Core optimistic transaction engine
+- **Shared memory management**: Creates 4GB shared memory region via `memfd_create()`
+- **Transaction tracking**: Maintains skiplist of read/write operations per transaction
+- **Optimistic validation**: Tracks read checksums, validates on commit against current DB state  
+- **Daemon communication**: Unix socket communication with commit worker process
+- **Read transactions**: Direct LMDB read access, cached for 100ms windows
+- **Write buffering**: In-memory skiplist stores writes until commit time
+- **Iterator support**: Cursor-based iteration with optimistic consistency
+
+**`lowlevel/commit_worker.c`** - Background commit daemon  
+- **Batched commits**: Processes up to 10K transactions per LMDB write transaction
+- **Multi-client handling**: Serves multiple processes via epoll-based event loop  
+- **Write validation**: Re-validates read checksums before applying writes
+- **Conflict resolution**: Marks conflicting transactions for retry
+- **Signal handling**: Notifies client processes of commit results via socket
+
+**`lowlevel/common.c`** - Shared utility code
+- **Important**: This file is #included (not linked) in both `transaction_client.c` and `commit_worker.c`
+- Contains shared data structures, constants, and utility functions
+- Skiplist implementation for write buffering
+- Checksum calculation (FNV-1a hash) for optimistic validation
+- Shared memory layout definitions
+
+**`lowlevel/common.h`** - Shared header definitions
+- Transaction state constants (`TRANSACTION_FREE`, `TRANSACTION_OPEN`, etc.)
+- Data structure definitions for shared memory layout
+- Macro definitions for error handling and logging
+- LMDB integration constants and helpers
+
+## Quick Usage Example (for context)
+
+```typescript
+import { init, transact, put, get } from 'olmdb';
+
+init(); // Start database and commit worker
+await transact(async () => {
+  await put('key', 'value');
+  return await get('key'); // Returns 'value'
+});
 ```
-src/
-├── olmdb.ts         # High-level API with transact(), AsyncLocalStorage context
-└── lowlevel.ts      # Low-level API loading native module
 
-lowlevel/
-├── napi.c           # Node.js native module interface
-├── transaction_client.c  # Core transaction and optimistic locking logic
-└── commit_worker.c  # Background daemon for write commits
+## Development Workflow
 
-tests/
-├── olmdb.test.ts    # High-level API tests
-└── lowlevel.test.ts # Low-level API tests
-
-vendor/lmdb/         # LMDB source code
-benchmark/           # Performance benchmarking suite
-tools/               # Build and documentation tools
-```
-
-## Development Setup
-
-### Prerequisites
-- Linux (primary supported platform)
-- Node.js 14+ or Bun
-- GCC for native compilation
-- Python 3 (for node-gyp)
-
-### Build Process
+### Building
 ```bash
-npm install          # Installs deps + compiles native modules via node-gyp
-npm run build        # Compiles TypeScript to dist/
-npm run test         # Runs both Bun and Node.js tests (use test:node if no Bun)
+npm install        # Builds native modules via node-gyp
+npm run build      # Compiles TypeScript to dist/
 ```
 
-### Testing Strategy
-- **Unit tests**: Jest-based tests in `tests/` directory
-- **Two test suites**: `olmdb.test.ts` (high-level API), `lowlevel.test.ts` (native module)
-- **Multi-runtime**: Tests run on both Node.js and Bun when available
-- **Build validation**: Tests include TypeScript compilation
+### Testing  
+```bash
+npm test           # Runs both Bun and Node.js test suites
+npm run test:bun   # Fast Bun-based tests
+npm run test:node  # Node.js tests with Jest
+```
 
-## Key Concepts for Contributors
+### Documentation Updates
+- **Auto-generated API docs**: Run `node tools/update-readme-tsdoc.js` to update function documentation in README.md
+- **Manual docs**: Update README.md directly for architecture/usage sections
+- **This file**: Keep AI_CONTRIBUTING.md updated when making architectural changes
 
-### Transaction Model
-- All operations must occur within `transact()` calls
-- Read operations are synchronous, commits are asynchronous (for write transactions)
-- Optimistic locking: transactions retry up to 3 times on conflicts
-- AsyncLocalStorage preserves transaction context across async calls
+## Common Development Patterns
 
-### Data Handling
-- Keys: Limited to 511 bytes
-- Values: Up to 4GB
-- Zero-copy: `Uint8Array`/`ArrayBuffer` point directly to LMDB memory (valid only during transaction)
-- Type conversions: `asString()`, `asBuffer()`, `asArray()` helpers
+### Adding New API Functions
+1. Add C implementation to `transaction_client.c`
+2. Export via N-API in `napi.c` 
+3. Add TypeScript declaration to `lowlevel.ts`
+4. Add high-level wrapper to `olmdb.ts` if needed
+5. Update tests and run documentation script
 
-### Performance Considerations
-- Read-only transactions are fully synchronous
-- Write transactions use batched commits via background daemon
-- Iterator cleanup is important for performance (auto-closed on transaction end)
+### Debugging Transaction Issues
+- Check transaction states in shared memory structures
+- Verify checksum calculations for read validation  
+- Trace daemon communication via socket messages
+- Use logging macros (`LOG`, `SET_ERROR`) in C code
+
+### Memory Management
+- Shared memory is managed by `transaction_client.c`
+- JavaScript buffers use zero-copy access to shared memory when possible
+- C code must handle cleanup on process exit/crash scenarios
+
+## Architecture Notes for Contributors
+
+- **Optimistic concurrency**: Reads are tracked via checksums, validated at commit time
+- **Process model**: Client processes communicate with single commit worker daemon
+- **Zero-copy semantics**: Data buffers are shared between JavaScript and C when possible  
+- **Platform limitation**: Currently Linux-only due to shared memory and socket usage
+- **Transaction isolation**: Uses AsyncLocalStorage to maintain transaction context across async calls
+
+- **Don't access zero-copy buffers outside transaction context** - `Uint8Array`/`ArrayBuffer` from LMDB are only valid during transaction
+- **Native module changes require rebuild** - Run `npm install` after C code changes  
+- **Transaction retries** - High-level API must handle automatic retries, low-level API does not
+- **Platform assumptions** - OLMDB is Linux-only; avoid cross-platform code patterns
+- **Memory safety** - C code must handle cleanup on process exit/crash scenarios
+- **Async context** - AsyncLocalStorage can be lost across certain async boundaries
 
 ## Contribution Guidelines for AI Assistants
 
-### Making Changes
-1. **Understand the layer**: Know whether you're working on high-level API, low-level API, or native code
-2. **Minimal changes**: Focus on surgical modifications rather than large refactors
-3. **Test early**: Run `npm run build && npm run test:node` frequently
-4. **Consider performance**: OLMDB prioritizes speed - avoid changes that add overhead
+### Making Effective Changes
+1. **Understand the layer**: Identify whether changes are needed in TypeScript API, N-API bridge, or core C logic
+2. **Minimal modifications**: Make surgical changes rather than large refactors
+3. **Test incrementally**: Run `npm run test:node` after each change
+4. **Performance first**: OLMDB prioritizes speed - avoid changes that add overhead
 
-### Common Tasks
-- **API changes**: Usually modify `src/olmdb.ts` and update tests
-- **Low-level changes**: May require changes to `src/lowlevel.ts` and/or C code in `lowlevel/`
-- **Documentation**: Update README.md using `npm run update-readme-tsdoc` for API docs
+### Common Development Tasks
+- **API modifications**: Usually in `src/olmdb.ts`, with tests in `tests/olmdb.test.ts`
+- **Low-level changes**: May need `src/lowlevel.ts` and/or C files in `lowlevel/`
+- **Documentation updates**: Use `node tools/update-readme-tsdoc.js` for API docs
 
-### Testing
-- Always run existing tests before and after changes
-- Add focused tests for new functionality
-- Prefer updating existing tests over creating new test files
-- Use `npm run test:node` if Bun is unavailable
+### Testing Approach
+- Run existing tests before and after changes: `npm run build && npm run test:node`  
+- Add focused tests for new functionality rather than comprehensive test suites
+- Prefer updating existing test files over creating new ones
+- Use Node.js tests (`test:node`) if Bun is unavailable
 
-### Files to Update When Changing Architecture
-When making significant architectural changes, update:
-- This file (`AI_CONTRIBUTING.md`) - architectural highlights only
-- `README.md` - user-facing documentation (use existing tooling)
-- Relevant test files
-- TypeScript types and interfaces
-
-### Common Pitfalls
-- Don't access zero-copy buffers outside transaction context
-- Don't forget to handle transaction retries in high-level API
-- Remember OLMDB is Linux-specific - avoid platform-specific assumptions
-- Native module changes require `npm install` to recompile
+### Files to Update for Architectural Changes
+- **This file** (`AI_CONTRIBUTING.md`) - Keep architectural highlights current
+- **README.md** - Use existing tooling for API docs, update manually for architecture/usage 
+- **Test files** - Add coverage for new functionality
+- **TypeScript definitions** - Update interfaces and types as needed
 
 ---
 
-**Remember**: Keep this guide focused on architectural highlights and essential development info. For detailed API documentation, refer to README.md. Update this file when making changes that affect the architecture or development workflow.
+**Remember**: This guide focuses on understanding and modifying OLMDB, not using it. For usage examples and detailed API documentation, see README.md. Keep this file updated when making architectural changes.

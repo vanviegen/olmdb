@@ -307,6 +307,10 @@ Parameters:
 * `key`: - The key to look up as a Uint8Array, ArrayBuffer, or string.
 
 
+Returns:
+
+The value associated with the key as a Uint8Array, or undefined if not found.
+
 ### getBuffer
 
 Retrieves a value from the database by key within the current transaction.
@@ -320,6 +324,10 @@ Parameters:
 * `key`: - The key to look up as a Uint8Array, ArrayBuffer, or string.
 
 
+Returns:
+
+The value associated with the key as an ArrayBuffer, or undefined if not found.
+
 ### getString
 
 Retrieves a value from the database by key within the current transaction and decodes it as a string.
@@ -332,6 +340,10 @@ Parameters:
 
 * `key`: - The key to look up as a Uint8Array, ArrayBuffer, or string.
 
+
+Returns:
+
+The value associated with the key as a UTF-8 decoded string, or undefined if not found.
 
 ### put
 
@@ -428,6 +440,10 @@ Parameters:
 * `fn`: - The function to execute within the transaction context
 
 
+Returns:
+
+A promise that resolves with the function's return value
+
 Examples:
 
 ```typescript
@@ -461,6 +477,10 @@ Parameters:
 * `opts.keyConvert`: - Function to convert key ArrayBuffers to type K (defaults to asArray).
 * `opts.valueConvert`: - Function to convert value ArrayBuffers to type V (defaults to asArray).
 
+
+Returns:
+
+A DbIterator instance.
 
 Examples:
 
@@ -509,6 +529,10 @@ Parameters:
 * `buffer`: - The ArrayBuffer to convert.
 
 
+Returns:
+
+A new Uint8Array view of the buffer.
+
 ### asBuffer
 
 Returns the ArrayBuffer as-is.
@@ -523,6 +547,10 @@ Parameters:
 * `buffer`: - The ArrayBuffer to return.
 
 
+Returns:
+
+The same ArrayBuffer.
+
 ### asString
 
 Converts an ArrayBuffer to a UTF-8 decoded string.
@@ -535,6 +563,11 @@ Helper function for use with scan() keyConvert and valueConvert options.
 Parameters:
 
 * `buffer`: - The ArrayBuffer to decode.
+
+
+Returns:
+
+A UTF-8 decoded string.
 ## Low-level API Reference
 
 The low-level API is what's exposed by the native module. It's a somewhat less convenient than the high-level API, but it's a good starting point if you require a different abstraction.
@@ -568,6 +601,10 @@ Starts a new transaction for database operations.
 | ---------- | ---------- |
 | `startTransaction` | `() => number` |
 
+Returns:
+
+A transaction ID (positive integer) to be used in subsequent operations
+
 ### commitTransaction
 
 Commits the transaction with the given ID.
@@ -584,6 +621,11 @@ Parameters:
 
 * `transactionId`: The ID of the transaction to commit
 
+
+Returns:
+
+true if committed immediately (read-only transaction), 
+false if queued for async commit
 
 ### abortTransaction
 
@@ -611,6 +653,10 @@ Parameters:
 * `transactionId`: The ID of the transaction
 * `key`: Key to look up
 
+
+Returns:
+
+The value if found, or undefined if the key doesn't exist
 
 ### put
 
@@ -657,6 +703,10 @@ Parameters:
 * `reverse`: If true, keys are returned in descending order
 
 
+Returns:
+
+An iterator ID to be used with readIterator() and closeIterator()
+
 ### readIterator
 
 Reads the next key-value pair from an iterator.
@@ -669,6 +719,10 @@ Parameters:
 
 * `iteratorId`: The ID of the iterator
 
+
+Returns:
+
+An object containing the key and value, or undefined if iteration is complete
 
 ### closeIterator
 
