@@ -17,13 +17,12 @@
   "files": [
     "src",
     "dist",
-    "tools/build.sh",
+    "binding.gyp",
     "vendor",
     "lowlevel"
   ],
   "scripts": {
     "build": "rm -rf dist ; tsc",
-    "postinstall": "./tools/build.sh",
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",
     "test:node": "npm run build && npx tsc -p tsconfig.test.json && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
@@ -50,6 +49,7 @@
     "@types/bun": "^1.2.16",
     "@types/node": "^22.10.6",
     "jest": "^30.0.3",
+    "node-gyp": "^10.0.0",
     "tsdoc-markdown": "^1.2.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"

@@ -6,7 +6,7 @@ import { dlopen } from "process";
 // @ts-ignore
 if (typeof __dirname === 'undefined') global.__dirname = (typeof import.meta === 'undefined') ? process.cwd() : path.dirname(fileURLToPath(import.meta.url));
 
-const BIN_DIR = process.env.OLMDB_BIN_DIR || path.resolve(`${__dirname}/../build/release/`);
+const BIN_DIR = process.env.OLMDB_BIN_DIR || path.resolve(`${__dirname}/../build/Release/`);
 
 const lowlevel = {} as any;
 dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.dlopen.RTLD_NOW);

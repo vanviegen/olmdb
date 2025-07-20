@@ -908,7 +908,7 @@ int get(int ltxn_id, const void *key_data, size_t key_size, void **value_data, s
     }
 
     if (rc == EINVAL) {
-        SET_ERROR("EINVAL", "Key length %d, key '%.*s', first char '%c'", key_size, (int)key_size, (char*)key_data, ((char *)key_data)[0]);
+        SET_ERROR("EINVAL", "Key length %zu, key '%.*s', first char '%c'", key_size, (int)key_size, (char*)key_data, ((char *)key_data)[0]);
         return -1; // Invalid key size
     }
     

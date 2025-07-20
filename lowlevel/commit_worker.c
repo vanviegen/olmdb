@@ -259,7 +259,7 @@ static void handle_client_command(int client_fd) {
     }
 
     if (!client->shared_memory) {
-        LOG_INTERNAL_ERROR("Client fd=%d does command=%c len=%d before init", client_fd, buffer[0], n);
+        LOG_INTERNAL_ERROR("Client fd=%d does command=%c len=%zd before init", client_fd, buffer[0], n);
         close(client_fd);
         return;
     }
@@ -435,8 +435,6 @@ static void perform_queued_commits() {
 
     // Mark all non-raced ltxns as succeeded
     for(int i=0; i<queued_commit_count; i++) {
-        int client_fd = queued_commits[i].client_fd;
-        uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
         ltxn_t *ltxn = queued_commits[i].ltxn;
         // If the transaction wasn't marked as raced, it has succeeded!
         if (ltxn->state == TRANSACTION_COMMITTING) {
@@ -448,8 +446,6 @@ static void perform_queued_commits() {
     // Notify all committing clients that their commits have been processed
     for(int i=0; i<queued_commit_count; i++) {
         int client_fd = queued_commits[i].client_fd;
-        uintptr_t shared_memory_displacement = clients[client_fd].shared_memory_displacement;
-        ltxn_t *ltxn = queued_commits[i].ltxn;
 
         // int client_fd = queued_commits[i].client_fd;
         if (clients[client_fd].waiting_for_signal) {
@@ -463,7 +459,7 @@ static void perform_queued_commits() {
     queued_commit_count = 0;
 
     LOG("Processed %d succeeded and %d raced commits for %d clients in %lld ms (including %lld ms for commit)", success, raced, notified, 
-        (end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000,
-        (end.tv_sec - commit.tv_sec) * 1000 + (end.tv_nsec - commit.tv_nsec) / 1000000);
+        (long long)((end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000),
+        (long long)((end.tv_sec - commit.tv_sec) * 1000 + (end.tv_nsec - commit.tv_nsec) / 1000000));
 }
 
