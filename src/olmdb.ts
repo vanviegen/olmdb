@@ -24,10 +24,13 @@ interface Transaction {
 }
 
 function runCallbacks(txn: Transaction, callbackList: "onCommitCallbacks" | "onRevertCallbacks") {
-    if (txn[callbackList]) {
-        for (const callback of txn[callbackList]) {
+    const cbs = txn[callbackList];
+    if (cbs) {
+        // Invoke callbacks in reverse order, to match backtracking semantics
+        for(let i = cbs.length - 1; i >= 0; i--) {
+            const cb = cbs[i];
             try {
-                callback();
+                cb();
             } catch (err) {
                 console.error(err);
             }

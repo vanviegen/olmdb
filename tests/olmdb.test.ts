@@ -578,7 +578,7 @@ describe('LMDB', () => {
             expect(nestedValue).toBe('nested-value'); // Nested transaction succeeded
         });
         
-        test('should execute multiple callbacks in order', async () => {
+        test('should execute multiple callbacks in reverse order', async () => {
             const executionOrder: string[] = [];
             
             await transact(() => {
@@ -593,8 +593,8 @@ describe('LMDB', () => {
                     executionOrder.push('third');
                 });
             });
-            
-            expect(executionOrder).toEqual(['first', 'second', 'third']);
+
+            expect(executionOrder).toEqual(['third', 'second', 'first']);
         });
         
         test('should handle errors in callbacks gracefully', async () => {
