@@ -12,7 +12,7 @@ const decoder = new TextDecoder();
  */
 export type Data = Uint8Array | ArrayBuffer | string;
 
-interface Transaction {
+type Transaction = {
     fn: () => any;
     resolve: (value: any) => void;
     reject: (reason: any) => void;
@@ -21,6 +21,9 @@ interface Transaction {
     retryCount: number;
     onCommitCallbacks?: Array<() => void>;
     onRevertCallbacks?: Array<() => void>;
+} & {
+    // Any symbol key is user data.
+    [key: symbol]: any;
 }
 
 function runCallbacks(txn: Transaction, callbackList: "onCommitCallbacks" | "onRevertCallbacks") {
@@ -123,6 +126,38 @@ function getTransaction(): Transaction {
         throw new TypeError("Db operations should be performed within in a transact()");
     }
     return transaction;
+}
+
+/**
+ * Attach some arbitrary user data to the current transaction context, which is
+ * attached to the currently running (async) task.
+ * @param key - A symbol key to store data in the current transaction context.
+ * @param value - The value to store.
+ * @throws {TypeError} If called outside of a transaction context.
+ * @example
+ * ```typescript
+ * const MY_SYMBOL = Symbol("myKey");
+ * await transact(async () => {
+ *   setTransactionData(MY_SYMBOL, "myValue");
+ *   await somethingAsync(); // Can be interleaved with other transactions
+ *   const value = getTransactionData(MY_SYMBOL);
+ *   console.log(value); // "myValue"
+ * });
+ */
+export function setTransactionData(key: symbol, value: any) {
+    const transaction = getTransaction();
+    transaction[key] = value;
+}
+
+/**
+ * Retrieves data from the current transaction context.
+ * @param key - A symbol key to retrieve data from the current transaction context.
+ * @returns - The value associated with the key, or undefined if not set.
+ * @throws {TypeError} If called outside of a transaction context.
+ */
+export function getTransactionData(key: symbol) {
+    const transaction = getTransaction();
+    return transaction[key] as any;
 }
 
 function toBuffer(key: Data): ArrayBufferLike {

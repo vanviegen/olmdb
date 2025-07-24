@@ -1,4 +1,4 @@
-import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit } from '../dist/olmdb.js';
+import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit, setTransactionData, getTransactionData } from '../dist/olmdb.js';
 import { expect, test, describe, beforeEach } from "@jest/globals";
 
 try {
@@ -499,7 +499,7 @@ describe('LMDB', () => {
         transact(() => expect(scan().toArray().length).toBe(25));
     })
 
-    describe('onCommit and onRevert callbacks', () => {
+    describe('transaction ready callbacks', () => {
         test('should execute onCommit callback when transaction succeeds', async () => {
             let callbackExecuted = false;
             let callbackValue = '';
@@ -662,6 +662,98 @@ describe('LMDB', () => {
             
             // Callbacks should have been called
             expect(revertCount).toBe(1);
+        });
+    });
+
+    describe('transaction data', () => {
+        test('should store and retrieve transaction data', async () => {
+            const TEST_KEY = Symbol('testKey');
+            const TEST_VALUE = { nested: 'object', number: 42 };
+            
+            const result = await transact(() => {
+                setTransactionData(TEST_KEY, TEST_VALUE);
+                return getTransactionData(TEST_KEY);
+            });
+            
+            expect(result).toEqual(TEST_VALUE);
+            
+            // Should return undefined for non-existent key
+            const nonExistent = await transact(() => {
+                return getTransactionData(Symbol('nonExistent'));
+            });
+            expect(nonExistent).toBeUndefined();
+        });
+        
+        test('should isolate transaction data between transactions', async () => {
+            const ISOLATION_KEY = Symbol('isolationKey');
+            const VALUE1 = 'tx1-value';
+            const VALUE2 = 'tx2-value';
+            
+            // First transaction
+            const result1 = await transact(() => {
+                setTransactionData(ISOLATION_KEY, VALUE1);
+                return getTransactionData(ISOLATION_KEY);
+            });
+            
+            // Second transaction should not see first transaction's data
+            const result2 = await transact(() => {
+                const existingValue = getTransactionData(ISOLATION_KEY);
+                setTransactionData(ISOLATION_KEY, VALUE2);
+                return {
+                    existing: existingValue,
+                    new: getTransactionData(ISOLATION_KEY)
+                };
+            });
+            
+            expect(result1).toBe(VALUE1);
+            expect(result2.existing).toBeUndefined();
+            expect(result2.new).toBe(VALUE2);
+        });
+        
+        test('should handle interleaving transactions', async () => {
+            const INTERLEAVE_KEY = Symbol('interleaveKey');
+            const TX1_VALUE = 'tx1-value';
+            const TX2_VALUE = 'tx2-value';
+            
+            // Start two transactions that will interleave
+            const tx1Promise = transact(async () => {
+                setTransactionData(INTERLEAVE_KEY, TX1_VALUE);
+                setState('tx1-data-set');
+                
+                // Wait for tx2 to set its data
+                await waitForState('tx2-data-set');
+                
+                // Should still see our own data, not tx2's
+                return getTransactionData(INTERLEAVE_KEY);
+            });
+            
+            const tx2Promise = transact(async () => {
+                // Wait for tx1 to set its data
+                await waitForState('tx1-data-set');
+                
+                setTransactionData(INTERLEAVE_KEY, TX2_VALUE);
+                setState('tx2-data-set');
+                
+                // Should see our own data, not tx1's
+                return getTransactionData(INTERLEAVE_KEY);
+            });
+            
+            const [result1, result2] = await Promise.all([tx1Promise, tx2Promise]);
+            
+            expect(result1).toBe(TX1_VALUE);
+            expect(result2).toBe(TX2_VALUE);
+        });
+        
+        test('should throw error when called outside transaction', () => {
+            const TEST_KEY = Symbol('testKey');
+            
+            expect(() => {
+                setTransactionData(TEST_KEY, 'value');
+            }).toThrow('should be performed within in a transact');
+            
+            expect(() => {
+                getTransactionData(TEST_KEY);
+            }).toThrow('should be performed within in a transact');
         });
     });
 
