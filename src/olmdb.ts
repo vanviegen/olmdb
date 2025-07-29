@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "async_hooks";
 import * as lowlevel from "./lowlevel.js";
 import { assert } from "console";
-export const { DatabaseError } = lowlevel;
+export { DatabaseError } from "./lowlevel.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -71,7 +71,7 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
         if (txn.retryCount > 100) {
-            txn.reject(new DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
+            txn.reject(new lowlevel.DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
         } else {
             console.log(`Retrying raced transaction (${txn.retryCount}/10)`);
             tryTransaction(txn); // Retry the transaction

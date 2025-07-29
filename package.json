@@ -1,6 +1,6 @@
 {
   "name": "olmdb",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "Optimistic LMDB. A very fast embedded key/value store featuring ACID transactions using optimistic locking, based on LMDB.",
   "main": "src/olmdb.ts",
   "type": "module",
