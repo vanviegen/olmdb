@@ -10,6 +10,12 @@ OLMDB is a high-performance, embedded on-disk key/value store that combines the 
 - 📦 **Zero Dependencies**: Minimal footprint, running on both Node and Bun. No server process to manage.
 - 🔧 **Simple API**: Near-instantaneous synchronous database reads and updates. Promise-based commits.
 
+Compared to [lmdb-js](https://github.com/kriszyp/lmdb-js) (which I only learned about *after* having finished this project 😅), OLMDB...
+- Uses optimistic locking to allow long-running parallel read/write transactions.
+- Can aggregate write-operations from multiple processes into a single LMDB transaction, improving write throughput.
+- Does not serialize your data for you, only working on binary data and strings.
+- Is not as battle-hardened.
+
 **Important caveat**: OLMDB (probably) only runs on Linux currently.
 
 ## Quick Demo
