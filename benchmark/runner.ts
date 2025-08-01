@@ -5,7 +5,7 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 
 // @ts-ignore
-if (typeof __dirname === 'undefined') global.__dirname = (typeof import.meta === 'undefined') ? process.cwd() : path.dirname(fileURLToPath(import.meta.url));
+const benchmarkDir = (typeof import.meta === 'undefined') ? path.resolve(process.cwd(), "benchmark") : path.dirname(fileURLToPath(import.meta.url));
 
 function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -85,7 +85,7 @@ async function main() {
 
     const resultPromises: Promise<any>[] = [];
     console.warn(`Starting ${options.threads} threads with ${options.tasks_per_thread} tasks each for ${options.duration} seconds...`);
-    const workerPath = path.resolve(__dirname, 'worker.ts');
+    const workerPath = path.resolve(benchmarkDir, 'worker.ts');
     if (options.threads > 1) {
         for (let i = 0; i < options.threads; i++) {
             const seed = (i * 0xdeadbeef) ^ i;

@@ -1,4 +1,4 @@
-import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit, setTransactionData, getTransactionData } from '../dist/olmdb.js';
+import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit, setTransactionData, getTransactionData } from 'olmdb';
 import { expect, test, describe, beforeEach } from "@jest/globals";
 
 try {
@@ -344,31 +344,28 @@ describe('LMDB', () => {
             put('scan-2', 'value2');
         });
         
-        const result = await transact(() => {
+        const count = await transact(() => {
             const iter = scan({});
             
             let count = 0;
-            let lastEntry;
             
-            // Read a few entries manually
             while (count < 5) {
                 const next = iter.next();
                 if (next.done) break;
-                
-                lastEntry = next.value;
+
+                expect(next.value.key).toBeInstanceOf(Uint8Array);
+                expect(next.value.value).toBeInstanceOf(Uint8Array);
+                expect(next.value.key.length).toBe(6);
+                expect(next.value.value.length).toBe(6);
                 count++;
             }
             
             iter.close(); // Explicitly close
             
-            return { count, lastEntry };
+            return count;
         });
         
-        expect(result.count).toBeGreaterThan(0);
-        if (result.lastEntry) {
-            expect(result.lastEntry.key).toBeInstanceOf(Uint8Array);
-            expect(result.lastEntry.value).toBeInstanceOf(Uint8Array);
-        }
+        expect(count).toBe(2);
     });
     
     test("should handle empty iteration", async () => {
@@ -449,7 +446,18 @@ describe('LMDB', () => {
             { key: 'c-key', value: 'c-value' }
         ]);
     });
-    
+
+    test("should handle subarrays", async () => {
+        const value = new Uint8Array([1, 2, 3, 4, 5]);
+        await transact(() => {
+            put(value.subarray(1,4), value.subarray(2));
+        });
+        const result = await transact(() => {
+            return get(new Uint8Array([2, 3, 4]));
+        });
+        expect(result).toEqual(new Uint8Array([3, 4, 5]));
+    });
+
     test("should scan reverse with from and til parameters", async () => {
         await transact(() => {
             put('a-key', 'a-value');

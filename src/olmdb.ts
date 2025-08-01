@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "async_hooks";
-import * as lowlevel from "./lowlevel.js";
+import * as lowlevel from "olmdb/lowlevel";
 import { assert } from "console";
-export { DatabaseError } from "./lowlevel.js";
+export { DatabaseError } from "olmdb/lowlevel";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -161,7 +161,12 @@ export function getTransactionData(key: symbol) {
 }
 
 function toBuffer(key: Data): ArrayBufferLike {
-    return key instanceof Uint8Array ? key.buffer : (key instanceof ArrayBuffer ? key : encoder.encode(key).buffer)
+    if (key instanceof ArrayBuffer) return key;
+    if (key instanceof Uint8Array) {
+        const b = key.buffer;
+        return b.byteLength == key.byteLength ? b : b.slice(key.byteOffset, key.byteOffset + key.byteLength);
+    }
+    return encoder.encode(key).buffer;
 }
 
 /**

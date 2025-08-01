@@ -5,4 +5,4 @@ package-lock.json
 dist
 node_modules
 build
-build.tests
+dist.tests

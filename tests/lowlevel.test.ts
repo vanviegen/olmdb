@@ -1,5 +1,5 @@
-import * as lowlevel from "../dist/lowlevel.js";
-import { describe, test, expect, beforeEach, beforeAll } from "@jest/globals";
+import * as lowlevel from "olmdb/lowlevel";
+import { describe, test, expect, beforeEach } from "@jest/globals";
 
 
 // Helper functions

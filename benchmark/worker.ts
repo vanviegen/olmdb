@@ -26,30 +26,31 @@ export async function run({ db_dir, value_size, gets_per_transaction, puts_per_t
     let transactions = 0;
     let tries = 0;
 
+    function run() {
+        tries++;
+        for(let j = 0; j < gets_per_transaction; j++) {
+            const key = Math.floor(Math.random() * key_count).toString();
+            olmdb.get(key);
+        }
+        for(let j = 0; j < puts_per_transaction; j++) {
+            const key = Math.floor(Math.random() * key_count).toString();
+            olmdb.put(key, putValues[transactions % putValues.length]);
+        }
+    }
+
     const tasks: Promise<void>[] = [];
     const endTime = Date.now() + duration * 1000;
     for (let i = 0; i < tasks_per_thread; i++) {
         tasks.push((async () => {
             while (Date.now() < endTime) {
                 transactions++;
-                await olmdb.transact(() => {
-                    tries++;
-                    for(let j = 0; j < gets_per_transaction; j++) {
-                        const key = Math.floor(Math.random() * key_count).toString();
-                        olmdb.get(key);
-                    }
-                    for(let j = 0; j < puts_per_transaction; j++) {
-                        const key = Math.floor(Math.random() * key_count).toString();
-                        olmdb.put(key, putValues[transactions % putValues.length]);
-                    }
-                });
+                await olmdb.transact(run);
 
             }
         })());
     }
     await Promise.all(tasks);
     return { transactions, retries: tries - transactions };
-
 }
 
 process.on('message', async (options: any) => {

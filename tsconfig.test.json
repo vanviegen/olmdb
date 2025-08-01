@@ -4,7 +4,7 @@
     "target": "es2022",
     "moduleResolution": "NodeNext",
     "rootDir": "./tests",
-    "outDir": "./build.tests",
+    "outDir": "./dist.tests",
     "lib": ["ES2022", "DOM", "ESNext.Iterator"],
     "declaration": true,
     "strict": true,
