@@ -143,6 +143,7 @@ function getTransaction(): Transaction {
  *   const value = getTransactionData(MY_SYMBOL);
  *   console.log(value); // "myValue"
  * });
+ * ```
  */
 export function setTransactionData(key: symbol, value: any) {
     const transaction = getTransaction();
