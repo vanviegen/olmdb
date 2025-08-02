@@ -5,6 +5,7 @@
       "name": "edinburgh",
       "dependencies": {
         "node-gyp": "^11.2.0",
+        "readme-tsdoc": "^1.0.0",
       },
       "devDependencies": {
         "@types/bun": "^1.2.16",
@@ -634,6 +635,8 @@
     "pure-rand": ["pure-rand@7.0.1", "", {}, "sha512-oTUZM/NAZS8p7ANR3SHh30kXB+zK2r2BPcEn/awJIbOvq82WoMN4p62AWWp3Hhw50G0xMsw1mhIBLqHw64EcNQ=="],
 
     "react-is": ["react-is@18.3.1", "", {}, "sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg=="],
+
+    "readme-tsdoc": ["readme-tsdoc@1.0.0", "", { "dependencies": { "typescript": "^5.0.0" }, "bin": { "readme-tsdoc": "src/cli.js" } }, "sha512-+WDanPh5SUdp1RNTrtFQDOhJPg21iJ4CNNR65Pcz/EP86UnKwOsWBRMCFjHifqkB+kkb0l/MYVc6vcW//mj15A=="],
 
     "require-directory": ["require-directory@2.1.1", "", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
 
