@@ -1,4 +1,4 @@
-import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit, setTransactionData, getTransactionData } from 'olmdb';
+import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit, setTransactionData, getTransactionData } from '../src/olmdb.js';
 import { expect, test, describe, beforeEach } from "@jest/globals";
 
 try {

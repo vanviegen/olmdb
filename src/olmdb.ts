@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from "async_hooks";
-import * as lowlevel from "olmdb/lowlevel";
 import { assert } from "console";
-export { DatabaseError } from "olmdb/lowlevel";
+
+import * as lowlevel from "./lowlevel.js";
+export { DatabaseError } from "./lowlevel.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

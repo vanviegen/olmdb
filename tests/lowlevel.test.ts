@@ -1,4 +1,4 @@
-import * as lowlevel from "olmdb/lowlevel";
+import * as lowlevel from "../src/lowlevel.js";
 import { describe, test, expect, beforeEach } from "@jest/globals";
 
 

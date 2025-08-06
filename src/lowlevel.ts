@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dlopen } from "process";
 
 // @ts-ignore
-if (typeof __dirname === 'undefined') global.__dirname = (typeof import.meta === 'undefined') ? process.cwd() : path.dirname(fileURLToPath(import.meta.url));
+if (typeof __dirname === 'undefined') global.__dirname = (typeof import.meta === 'undefined') ? process.cwd() : path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 const BIN_DIR = process.env.OLMDB_BIN_DIR || path.resolve(`${__dirname}/../build/Release/`);
 

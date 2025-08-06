@@ -1,3 +1,4 @@
+#define _GNU_SOURCE // For CLOCK_MONOTONIC
 #include "common.h"
 #include <errno.h>
 #include <fcntl.h>
