@@ -190,7 +190,7 @@ async function main() {
     });
     
     const result1 = transact(async () => {
-        // This will be retried up to 3 times if another transaction
+        // This will be retried up to 6 times if another transaction
         // modifies the same data concurrently
         const value = parseInt(getString('counter') || '0') + 1;
         console.log('transaction1: put counter', value);
@@ -226,7 +226,7 @@ What this demonstrates is a race condition, gracefully handled by a retry:
 - In the meantime, the result2 transaction will have read and updated the `counter`.
 - On write-commit, the result1 transaction notices that `counter` has changed since it has read it, invalidating the transaction, and running the provided function again. This time it reads 52 instead of 42.
 
-OLMDB retries a transaction 4 times before giving up (and throwing an exception).
+OLMDB retries a transaction 6 times before giving up (and throwing an exception).
 
 
 ## Performance
@@ -284,7 +284,7 @@ After a batch of OLMDB transactions has been processed, the LMDB transaction is 
 ### Retryable transactions
 The high-level API, written in TypeScript provides a `transact(func)` method that runs a function within the context of an OLMDB transaction. This transaction context is preserved in [AsyncLocalStorage](https://nodejs.org/api/async_context.html#class-asynclocalstorage), so that you can just call functions like `put` and `get` without having to pass along a transaction object. This can be convenient when database accesses are deeply nested.
 
-After the provided function is done running, `transact()` does an OLMDB commit, and (for read/write transactions) registers a callback function. In case it gets called with a 'raced' status, the function will be executed again within a new transaction context. This happens up to four times before giving up.
+After the provided function is done running, `transact()` does an OLMDB commit, and (for read/write transactions) registers a callback function. In case it gets called with a 'raced' status, the function will be executed again within a new transaction context. This happens up to six times before giving up.
 
 ### Scaling
 You can run as many JavaScript processes, and within each as many concurrent request handlers as you want. LMDB allows multiple processes (on the same machine) to safely run read-only transaction in the same database file simultaneously. All read/write operations are committed to LMDB by the single threaded commit worker daemon, which may be a bottleneck for write-heavy workloads, though it's highly efficient and sure therefore scale to thousands of transactions per second. 
@@ -497,7 +497,7 @@ Executes a function within a database transaction context.
 All database operations (get, put, del) must be performed within a transaction.
 Transactions are automatically committed if the function completes successfully,
 or aborted if an error occurs. Failed transactions may be automatically retried
-up to 3 times in case of validation conflicts.
+up to 6 times in case of validation conflicts.
 
 **Signature:** `<T>(fn: () => T) => Promise<T>`
 

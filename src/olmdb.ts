@@ -70,10 +70,10 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
         
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
-        if (txn.retryCount > 100) {
+        if (txn.retryCount > 6) {
             txn.reject(new lowlevel.DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
         } else {
-            console.log(`Retrying raced transaction (${txn.retryCount}/10)`);
+            console.log(`Retrying raced transaction (${txn.retryCount}/6)`);
             tryTransaction(txn); // Retry the transaction
         }
     }
@@ -291,7 +291,7 @@ export function onCommit(callback: () => void): void {
  * All database operations (get, put, del) must be performed within a transaction.
  * Transactions are automatically committed if the function completes successfully,
  * or aborted if an error occurs. Failed transactions may be automatically retried
- * up to 3 times in case of validation conflicts.
+ * up to 6 times in case of validation conflicts.
  * 
  * @template T - The return type of the transaction function
  * @param fn - The function to execute within the transaction context
