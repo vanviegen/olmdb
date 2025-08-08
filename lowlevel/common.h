@@ -140,5 +140,6 @@ static inline int compare_keys(uint16_t key1_size, const char *key1, uint16_t ke
 int init_lmdb(const char *db_dir);
 int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse);
 uint64_t checksum(const char *data, size_t len, uint64_t val);
+char* format_binary_data(const void* data, size_t len);
 
 #endif // OLMDB_COMMON_H

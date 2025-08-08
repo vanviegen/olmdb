@@ -108,3 +108,71 @@ uint64_t checksum(const char *data, size_t len, uint64_t val) {
     return val;
 }
 
+
+// Helper function to format binary data for safe logging
+char* format_binary_data(const void* data, size_t len) {
+    static char buffers[4][512]; // Multiple buffers for multiple calls in one LOG
+    static int buffer_index = 0;
+    
+    char* buffer = buffers[buffer_index];
+    buffer_index = (buffer_index + 1) % 4; // Rotate through buffers
+    
+    if (!data || len == 0) {
+        strcpy(buffer, "(null)");
+        return buffer;
+    }
+    
+    const unsigned char* bytes = (const unsigned char*)data;
+    char* pos = buffer;
+    size_t remaining = sizeof(buffers[0]) - 1; // Leave space for null terminator
+    
+    for (size_t i = 0; i < len && remaining > 6; i++) {
+        // Look ahead to see if we have a string of at least 2 printable chars
+        size_t string_len = 0;
+        while (i + string_len < len && 
+               bytes[i + string_len] >= 32 && bytes[i + string_len] < 127 &&
+               bytes[i + string_len] != '"') {
+            string_len++;
+        }
+        
+        if (string_len >= 2 && remaining > string_len + 3) {
+            // Print as quoted string
+            *pos++ = '"';
+            remaining--;
+            for (size_t j = 0; j < string_len; j++) {
+                *pos++ = bytes[i + j];
+                remaining--;
+            }
+            *pos++ = '"';
+            remaining--;
+            i += string_len - 1; // -1 because loop will increment
+            
+            // Add space if not at end
+            if (i + 1 < len && remaining > 1) {
+                *pos++ = ' ';
+                remaining--;
+            }
+        } else {
+            // Print as hex byte
+            int written = snprintf(pos, remaining, "%02x", bytes[i]);
+            if (written >= (int)remaining) break; // Not enough space
+            pos += written;
+            remaining -= written;
+            
+            // Add space if not at end
+            if (i + 1 < len && remaining > 1) {
+                *pos++ = ' ';
+                remaining--;
+            }
+        }
+    }
+    
+    if (remaining <= 6) {
+        // Truncated - indicate this
+        strcpy(pos - 3, "...");
+    } else {
+        *pos = '\0';
+    }
+    
+    return buffer;
+}

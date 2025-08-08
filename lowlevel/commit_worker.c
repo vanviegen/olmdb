@@ -299,23 +299,16 @@ static int validate_reads(MDB_txn *wtxn, ltxn_t *ltxn, uintptr_t shared_memory_d
     while (current) {
         if (current->row_count != 0) { // Iterator
             int reverse = current->row_count < 0;
+            int row_count = abs(current->row_count);
+            // LOG("Validating %d iterated rows for key='%s' (reverse=%d)", row_count, format_binary_data(current->key_data, current->key_size), reverse);
             
             key.mv_size = current->key_size;
             key.mv_data = current->key_data;
             int rc = place_cursor(validation_cursor, &key, &value, reverse);
-            if (rc != MDB_SUCCESS) {
-                LOG_INTERNAL_ERROR("Failed to place cursor for iterator validation: %s", mdb_strerror(rc));
-                error_shutdown();
-            }
             
             uint64_t cs = CHECKSUM_INITIAL;
-            cs = checksum(key.mv_data, key.mv_size, cs);
-            cs = checksum(value.mv_data, value.mv_size, cs);
-            
-            int row_count = abs(current->row_count);
-            for(int i = 0; i < row_count; i++) {
-                // Read the next item in the LMDB cursor
-                int rc = mdb_cursor_get(validation_cursor, &key, &value, reverse ? MDB_PREV : MDB_NEXT);
+
+            while(1) {
                 if (rc == MDB_NOTFOUND) {
                     key.mv_data = value.mv_data = NULL;
                     key.mv_size = value.mv_size = 0;
@@ -323,16 +316,23 @@ static int validate_reads(MDB_txn *wtxn, ltxn_t *ltxn, uintptr_t shared_memory_d
                     LOG_INTERNAL_ERROR("Failed to read next item in cursor validation: %s", mdb_strerror(rc));
                     error_shutdown();
                 }
+
                 cs = checksum(key.mv_data, key.mv_size, cs);
                 cs = checksum(value.mv_data, value.mv_size, cs);
+                // LOG("- key='%s' value='%s'", format_binary_data(key.mv_data, key.mv_size), format_binary_data(value.mv_data, value.mv_size));
+
+                if (--row_count <= 0) break; // Stop after reading the expected number of rows
+                rc = mdb_cursor_get(validation_cursor, &key, &value, reverse ? MDB_PREV : MDB_NEXT);
             }
             
             if (cs != current->checksum) {
+                // LOG("* Validation failed: expected checksum %llu, got %llu", (unsigned long long)current->checksum, (unsigned long long)cs);
                 return 0; // Validation failed
             }
         } else { // Regular read (row_count == 0)
             key.mv_data = current->key_data;
             key.mv_size = current->key_size;
+            // LOG("Validating single read for key='%s'", format_binary_data(key.mv_data, key.mv_size));
             int rc = mdb_get(wtxn, dbi, &key, &value);
             uint64_t cs = CHECKSUM_INITIAL;
             if (rc == MDB_NOTFOUND) {
@@ -344,6 +344,7 @@ static int validate_reads(MDB_txn *wtxn, ltxn_t *ltxn, uintptr_t shared_memory_d
                 error_shutdown();
             }
             if (cs != current->checksum) {
+                // LOG("Validation failed for key='%s': expected checksum %llu, got %llu", format_binary_data(key.mv_data, key.mv_size), (unsigned long long)current->checksum, (unsigned long long)cs);
                 return 0; // Validation failed
             }
         }

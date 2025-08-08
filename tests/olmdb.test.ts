@@ -337,6 +337,35 @@ describe('LMDB', () => {
         
         expect(results[0]).toEqual({ key: 'b-key', value: 'b-value' });
     });
+
+    test("changes values while iterating them", async () => {
+        await transact(() => {
+            put('a-key', 'a-value');
+            put('z-key', 'z-value');
+            put('e-key', 'e-value');
+            put('b-key', 'b-value');
+            put('c-key', 'c-value');
+        });
+        
+        await transact(() => {
+            for (const entry of scan({ keyConvert: asString, valueConvert: asString })) {
+                if (entry.key === 'b-key') {
+                    put('b-key', 'new-b-value');
+                }
+                if (entry.key === 'c-key') break; // Test partial iteration and verification
+            }
+        });
+
+        const results = await transact(() => {
+            const collected: string[] = [];
+            for (const entry of scan({ keyConvert: asString, valueConvert: asString })) {
+                collected.push(entry.value);
+            }
+            return collected;
+        });
+
+        expect(results).toEqual(['a-value', 'new-b-value', 'c-value', 'e-value', 'z-value']);
+    });
     
     test("should handle manual iterator control", async () => {
         await transact(() => {
