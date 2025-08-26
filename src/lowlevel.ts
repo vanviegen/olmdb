@@ -16,7 +16,7 @@ dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.d
  * 
  * @param onCommit Callback function that will be invoked when an asynchronous 
  *   transaction commit completes. The callback receives the transaction ID and
- *   whether the commit succeeded.
+ *   the commit sequence number (0 when the transaction failed).
  * @param directory Optional path to the database directory. If not provided,
  *   defaults to the OLMDB_DIR environment variable or "./.olmdb".
  * @param commitWorkerBin Path to the commit worker binary. Defaults to
@@ -24,7 +24,7 @@ dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.d
  * @throws DatabaseError if initialization fails
  */
 export function init(
-  onCommit: (transactionId: number, success: boolean) => void,
+  onCommit: (transactionId: number, commitSeq: number) => void,
   directory?: string,
   commitWorkerBin: string = `${BIN_DIR}/commit_worker`
 ): void {
@@ -47,11 +47,11 @@ export const startTransaction = lowlevel.startTransaction as () => number;
  * When the commit is processed, the onCommit callback provided to init() will be invoked.
  * 
  * @param transactionId The ID of the transaction to commit
- * @returns true if committed immediately (read-only transaction), 
- *          false if queued for async commit
+ * @returns For read-only transactions: the commit sequence number
+ *          For read/write: 0 (commit will be async)
  * @throws DatabaseError if the transaction cannot be committed
  */
-export const commitTransaction = lowlevel.commitTransaction as (transactionId: number) => boolean;
+export const commitTransaction = lowlevel.commitTransaction as (transactionId: number) => number;
 
 /**
  * Aborts the transaction with the given ID, discarding all changes.

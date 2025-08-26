@@ -14,20 +14,21 @@ function arrayBufferToString(buffer: ArrayBuffer): string {
 }
 
 // Map to track pending transaction commits
-const pendingCommits = new Map<number, { resolve: (success: boolean) => void }>();
+const pendingCommits = new Map<number, (commitSeq: number) => void>();
 
-function commitAndWait(transactionId: number): Promise<boolean> {
+// Returns 0 on error and the commitSeq on success
+function commitAndWait(transactionId: number): Promise<number> {
     return new Promise((resolve) => {
         // Store the resolver in our map
-        pendingCommits.set(transactionId, { resolve });
+        pendingCommits.set(transactionId, resolve);
         
         // Attempt to commit the transaction
-        const isImmediate = lowlevel.commitTransaction(transactionId);
-        
-        if (isImmediate) {
+        const commitSeq = lowlevel.commitTransaction(transactionId);
+
+        if (commitSeq) {
             // Read-only transaction completed immediately
             pendingCommits.delete(transactionId);
-            resolve(true);
+            resolve(commitSeq);
         }
         // If not immediate, the onCommit callback will handle resolution
     });
@@ -35,11 +36,11 @@ function commitAndWait(transactionId: number): Promise<boolean> {
 
 try {
     // Initialize with global onCommit callback
-    lowlevel.init((transactionId: number, success: boolean) => {
+    lowlevel.init((transactionId: number, commitSeq: number) => {
         // Resolve the corresponding promise
         const pendingCommit = pendingCommits.get(transactionId);
         if (pendingCommit) {
-            pendingCommit.resolve(success);
+            pendingCommit(commitSeq);
             pendingCommits.delete(transactionId);
         }
     }, "./.olmdb_test");
@@ -127,7 +128,7 @@ describe('Lowlevel Tests', () => {
             // Validation failure check
             lowlevel.put(txn1Id, stringToArrayBuffer("concurrent1"), stringToArrayBuffer("conflict"));
             const success = await commitAndWait(txn1Id);
-            expect(success).toBe(false); // Expecting commit to fail
+            expect(success).toBe(0); // Expecting commit to fail
             
             // Final state verification
             const finalTxnId = lowlevel.startTransaction();

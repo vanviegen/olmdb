@@ -666,6 +666,40 @@ describe('LMDB', () => {
             expect(value).toBe('value');
         });
         
+        test('should provide increasing commitSeq values', async () => {
+            const commitSeqs: number[] = [];
+            
+            // First write transaction
+            await transact(() => {
+                put('seq-test-1', 'value1');
+                onCommit((commitSeq) => {
+                    commitSeqs.push(commitSeq);
+                });
+            });
+            
+            // Read transaction
+            await transact(() => {
+                getString('seq-test-1');
+                onCommit((commitSeq) => {
+                    commitSeqs.push(commitSeq);
+                });
+            });
+            
+            // Second write transaction
+            await transact(() => {
+                put('seq-test-2', 'value2');
+                onCommit((commitSeq) => {
+                    commitSeqs.push(commitSeq);
+                });
+            });
+            
+            // Verify sequences are increasing
+            expect(commitSeqs).toHaveLength(3);
+            expect(commitSeqs[0]).toBeGreaterThan(0);
+            expect(commitSeqs[0]).toBeLessThan(commitSeqs[1]);
+            expect(commitSeqs[1]).toBeLessThan(commitSeqs[2]);            
+        });
+        
         test('should throw error when calling onCommit outside transaction', () => {
             expect(() => {
                 onCommit(() => {});

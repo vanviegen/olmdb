@@ -341,6 +341,8 @@ static void assign_rtxn_wrapper(ltxn_t *ltxn) {
         }
     }
     rtxn_wrapper->ref_count = 1;
+    // Our read-only commit seq will be 1 lower than the next read/write transaction to commit
+    rtxn_wrapper->commit_seq = (mdb_txn_id(rtxn_wrapper->rtxn)+1) * MAX_BATCHED_COMMITS;
     current_rtxn_wrapper = rtxn_wrapper;
     current_rtxn_expire_time = time + RTXN_SPAN_TIME_MS; // Share this read transaction with all logical transactions started within the next 100 ms
     ltxn->rtxn_wrapper = rtxn_wrapper;
@@ -1122,16 +1124,18 @@ int close_iterator(int iterator_id) {
     return 0;
 }
 
-int commit_transaction(int ltxn_id) {
+size_t commit_transaction(int ltxn_id) {
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
     if (!ltxn) return -1; // Error already set
-    
+
+    size_t commit_seq = ltxn->rtxn_wrapper->commit_seq;
+
     release_rtxn_wrapper(ltxn);
     
     if (!ltxn->has_writes) {
         // Read-only transaction, commit immediately
         release_ltxn(ltxn);
-        return 1; // No async work needed
+        return commit_seq; // No async work needed
     }
 
     // Allow the read iterators to be recycled
@@ -1199,7 +1203,7 @@ int get_commit_results(commit_result_t *results, int *result_count) {
             return_value = max(return_value, 1);
         } else {
             results[index].ltxn_id = ltxn_to_id(ltxn);
-            results[index].success = (ltxn->state == TRANSACTION_SUCCEEDED) ? 1 : 0;
+            results[index].commit_seq = (ltxn->state == TRANSACTION_SUCCEEDED) ? ltxn->commit_seq : 0;
             index++;
             release_ltxn(ltxn);
         }

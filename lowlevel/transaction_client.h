@@ -8,12 +8,12 @@
  * @struct commit_result_t
  * @brief Structure containing the result of a transaction commit operation.
  * 
- * @field ltxn_id  The transaction ID that was committed.
- * @field success  1 if commit was successful, 0 if failed due to race condition or other error.
+ * @field commit_seq  0 for race/failure, commit sequence number for success.
+ * @field ltxn_id     The transaction ID that was committed.
  */
 typedef struct {
+    size_t commit_seq;
     int ltxn_id;
-    int success; // 1 for success, 0 for race/failure
 } commit_result_t;
 
 /**
@@ -53,12 +53,11 @@ int start_transaction();
  * @param ltxn_id Transaction ID to commit.
  * 
  * @return 0: The transaction has writes and was queued for asynchronous commit.
- *         1: The transaction was read-only and was committed immediately.
- *         -1: On failure, see error_code/error_message for details.
+ *         >0: The transaction was read-only and was committed immediately, with this commit sequence number.
  * 
  * @error INVALID_TRANSACTION Transaction ID not found or already closed.
  */
-int commit_transaction(int ltxn_id);
+size_t commit_transaction(int ltxn_id);
 
 /**
  * @brief Abort a transaction.

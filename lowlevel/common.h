@@ -8,6 +8,9 @@
 
 #define SKIPLIST_DEPTH 4 // Number of levels in the skiplist
 
+#define MAX_BATCHED_COMMITS 4096 // Maximum number of ltxn that we try to process in a single wtxn
+#define MAX_CLIENTS 256 // Maximum number of processes that can be connected to this worker
+
 // For use by our checksum hash function (simple FNV-1a)
 #define CHECKSUM_INITIAL 0xcbf29ce484222325ULL
 #define CHECKSUM_PRIME 0x100000001b3ULL
@@ -85,7 +88,10 @@ typedef struct log_buffer_struct {
 typedef struct rtxn_wrapper_struct {
     MDB_txn *rtxn;
     union {
-        int ref_count;
+        struct {
+            size_t commit_seq;
+            int ref_count;
+        };
         struct rtxn_wrapper_struct *next_free; // Free list
     };
 } rtxn_wrapper_t;
@@ -103,6 +109,7 @@ typedef struct ltxn_struct {
     read_log_t *first_read_log; // Chronologically first read entry
     read_log_t *last_read_log; // Chronologically last read entry
     update_log_t *update_log_skiplist_ptrs[SKIPLIST_DEPTH]; // Skiplist for write entries, 4 pointers for 4 levels
+    size_t commit_seq; // Commit sequence number, higher means later
 
     // These point to memory outside the shared memory area
     rtxn_wrapper_t *rtxn_wrapper; // Read-only transaction wrapper

@@ -82,9 +82,11 @@ static void signal_job_complete(napi_env env, napi_status status, void* data) {
             for (int i = 0; i < result_count; i++) {
                 // Create the transaction ID argument
                 napi_create_int32(env, batch[i].ltxn_id, &args[0]);
-                // Create the success argument
-                napi_get_boolean(env, batch[i].success, &args[1]);
-                
+                // Create the commit_seq argument
+                // We're wrapping at MAX_SAFE_INTEGER -- yes that sucks, as it may cause
+                // weirdness every once in a while on large installs. But it beats the
+                // alternative of losing precision and being wrong more and more over time.
+                napi_create_int64(env, batch[i].commit_seq & 0x1fffffffffffff, &args[1]);
                 // Call the JavaScript callback
                 napi_call_function(env, undefined, callback, 2, args, &result);
             }
@@ -229,19 +231,15 @@ napi_value js_commit_transaction(napi_env env, napi_callback_info info) {
         return NULL;
     }
         
-    int result = commit_transaction(ltxn_id);
+    size_t commit_seq = commit_transaction(ltxn_id);
 
-    if (result < 0) {
-        throw_database_error(env);
-        return NULL;
-    }
-
-    if (result==0 && !signal_job_running) {
+    if (commit_seq == 0 && !signal_job_running) { // async result
         start_signal_job();
     }
-        
+
     napi_value js_result;
-    napi_get_boolean(env, result > 0, &js_result);
+    // See comment about this int wrap in signal_job_complete
+    napi_create_int64(env, commit_seq & 0x1fffffffffffff, &js_result);
     return js_result;
 }
 

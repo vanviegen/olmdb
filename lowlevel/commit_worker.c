@@ -13,9 +13,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define MAX_BATCHED_COMMITS 10240 // Maximum number of ltxn that we try to process in a single wtxn
-#define MAX_CLIENTS 256 // Maximum number of processes that can be connected to this worker
-
 #define LOG(fmt, ...) \
     do { \
         if (log_fd >= 0) { \
@@ -428,6 +425,9 @@ static void perform_queued_commits() {
 
     clock_gettime(CLOCK_MONOTONIC, &commit);
 
+    // Get the LMDB-part of the commit sequence
+    size_t commit_seq_part = mdb_txn_id(wtxn) * MAX_BATCHED_COMMITS + 1; // May never be 0
+
     // Commit the wtxn
     rc = mdb_txn_commit(wtxn);
     if (rc != MDB_SUCCESS) {
@@ -441,6 +441,8 @@ static void perform_queued_commits() {
         // If the transaction wasn't marked as raced, it has succeeded!
         if (ltxn->state == TRANSACTION_COMMITTING) {
             ltxn->state = TRANSACTION_SUCCEEDED; // Mark transaction as succeeded
+            // Append the with-in transaction part of the commit sequence
+            ltxn->commit_seq = commit_seq_part + i;
             success++;
         }
     }

@@ -20,21 +20,21 @@ type Transaction = {
     id: number;
     result?: any;
     retryCount: number;
-    onCommitCallbacks?: Array<() => void>;
-    onRevertCallbacks?: Array<() => void>;
+    onCommitCallbacks?: Array<(txId: number) => void>;
+    onRevertCallbacks?: Array<(txId: number) => void>;
 } & {
     // Any symbol key is user data.
     [key: symbol]: any;
 }
 
-function runCallbacks(txn: Transaction, callbackList: "onCommitCallbacks" | "onRevertCallbacks") {
+function runCallbacks(txn: Transaction, callbackList: "onRevertCallbacks" | "onCommitCallbacks", commitSeq: number): void {
     const cbs = txn[callbackList];
     if (cbs) {
         // Invoke callbacks in reverse order, to match backtracking semantics
         for(let i = cbs.length - 1; i >= 0; i--) {
             const cb = cbs[i];
             try {
-                cb();
+                cb(commitSeq);
             } catch (err) {
                 console.error(err);
             }
@@ -50,7 +50,7 @@ const pendingTransactions = new Map<number, Transaction>();
 let isInitialized = false;
 
 // Global commit handler that will be passed to lowlevel.init
-function globalCommitHandler(transactionId: number, success: boolean): void {
+function globalCommitHandler(transactionId: number, commitSeq: number): void {
     const txn = pendingTransactions.get(transactionId);
     if (!txn) {
         console.warn(`Received commit for unknown transaction ${transactionId}`);
@@ -60,14 +60,14 @@ function globalCommitHandler(transactionId: number, success: boolean): void {
     pendingTransactions.delete(transactionId);
     txn.id = -1; // Mark as done
     
-    if (success) {
+    if (commitSeq) {
         // Execute onCommit callbacks outside transaction context
-        runCallbacks(txn, "onCommitCallbacks");
+        runCallbacks(txn, "onCommitCallbacks", commitSeq);
         
         txn.resolve(txn.result);
     } else {
         // Execute onRevert callbacks for retry failure
-        runCallbacks(txn, "onRevertCallbacks");
+        runCallbacks(txn, "onRevertCallbacks", 0);
         
         // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
@@ -86,7 +86,7 @@ async function tryTransaction(txn: Transaction) {
     pendingTransactions.set(txn.id, txn);
     
     let error: any = null;
-    let immediateCommit = false;
+    let commitSeq: number = 0;
     
     await transactionStorage.run(txn, async () => {
         assert(txn.id >= 0, "Transaction ID should be valid 2");
@@ -101,18 +101,18 @@ async function tryTransaction(txn: Transaction) {
         }
 
         assert(txn.id >= 0, "Transaction ID should be valid 3");
-        immediateCommit = lowlevel.commitTransaction(txn.id);
+        commitSeq = lowlevel.commitTransaction(txn.id);
         // Note: Don't execute callbacks here as we're still within transaction context
     });
     
-    if (error || immediateCommit) {        
+    if (error || commitSeq) {        
         pendingTransactions.delete(txn.id);
         txn.id = -1;
         if (error) {
-            runCallbacks(txn, "onRevertCallbacks");
+            runCallbacks(txn, "onRevertCallbacks", 0);
             txn.reject(error);
         } else {
-            runCallbacks(txn, "onCommitCallbacks");        
+            runCallbacks(txn, "onCommitCallbacks", commitSeq);
             txn.resolve(txn.result);
         }
     }
@@ -266,10 +266,10 @@ export function init(dbDir?: string): void {
  * Registers a callback to be executed when the current transaction is reverted (aborted due to error).
  * The callback will be executed outside of transaction context.
  * 
- * @param callback - Function to execute when transaction is reverted
+ * @param callback - Function to execute when transaction is reverted. It receives the dummy (always 0) commit sequence indicating failure as an argument.
  * @throws {TypeError} If called outside of a transaction context
  */
-export function onRevert(callback: () => void): void {
+export function onRevert(callback: (commitSeq: number) => void): void {
     const transaction = getTransaction();
     (transaction.onRevertCallbacks ||= []).push(callback);
 }
@@ -278,10 +278,10 @@ export function onRevert(callback: () => void): void {
  * Registers a callback to be executed when the current transaction commits successfully.
  * The callback will be executed outside of transaction context.
  * 
- * @param callback - Function to execute when transaction commits
+ * @param callback - Function to execute when transaction commits. It receives the commit sequence, which is an always-increasing number that provides a global ordering of commits, as an argument.
  * @throws {TypeError} If called outside of a transaction context
  */
-export function onCommit(callback: () => void): void {
+export function onCommit(callback: (commitSeq: number) => void): void {
     const transaction = getTransaction();
     (transaction.onCommitCallbacks ||= []).push(callback);
 }
