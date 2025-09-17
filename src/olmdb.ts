@@ -314,6 +314,9 @@ export function onCommit(callback: (commitSeq: number) => void): void {
  * });
  * ```
  */
+export function transact<T>(fn: () => Promise<T>): Promise<T>;
+export function transact<T>(fn: () => T): Promise<T>;
+
 export function transact<T>(fn: () => T): Promise<T> {
     // Auto-initialize if needed
     if (!isInitialized) init();

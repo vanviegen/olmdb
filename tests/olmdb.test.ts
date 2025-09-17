@@ -828,5 +828,26 @@ describe('LMDB', () => {
         });
     });
 
+    test("TypeScript should complain only when needed", () => {
+        // `transact` takes an async function -- no Promise<Promise<T>> but just Promise<T> returned
+        function test1<T>(fn: () => T): Promise<T> {
+            return transact(async (): Promise<T> => {
+                return fn();
+            });
+        }
+
+        // `transact` takes a sync function
+        function test2<T>(fn: () => T): Promise<T> {
+            return transact((): T => {
+                return fn();
+            });
+        }
+
+        // @ts-expect-error: should not accept funcs with args
+        transact((str: string): string => {
+            return "";
+        });
+    })
+
 });
 
