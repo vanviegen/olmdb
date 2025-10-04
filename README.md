@@ -300,7 +300,7 @@ The high-level API provides a promise-based, type-safe interface with automatic 
 
 The following is auto-generated from `src/olmdb.ts`:
 
-### setTransactionData · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L149)
+### setTransactionData · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L118)
 
 Attach some arbitrary user data to the current transaction context, which is
 attached to the currently running (async) task.
@@ -328,7 +328,7 @@ await transact(async () => {
 });
 ```
 
-### getTransactionData · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L160)
+### getTransactionData · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L129)
 
 Retrieves data from the current transaction context.
 
@@ -344,7 +344,7 @@ Retrieves data from the current transaction context.
 
 - If called outside of a transaction context.
 
-### get · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L184)
+### get · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L153)
 
 Retrieves a value from the database by key within the current transaction.
 
@@ -363,7 +363,7 @@ Retrieves a value from the database by key within the current transaction.
 - With code "KEY_TOO_LONG" if key exceeds maximum allowed length.
 - With code "LMDB-{code}" for LMDB-specific errors.
 
-### getBuffer · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L199)
+### getBuffer · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L168)
 
 Retrieves a value from the database by key within the current transaction.
 
@@ -382,7 +382,7 @@ Retrieves a value from the database by key within the current transaction.
 - With code "KEY_TOO_LONG" if key exceeds maximum allowed length.
 - With code "LMDB-{code}" for LMDB-specific errors.
 
-### getString · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L213)
+### getString · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L182)
 
 Retrieves a value from the database by key within the current transaction and decodes it as a string.
 
@@ -401,7 +401,7 @@ Retrieves a value from the database by key within the current transaction and de
 - With code "KEY_TOO_LONG" if key exceeds maximum allowed length.
 - With code "LMDB-{code}" for LMDB-specific errors.
 
-### put · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L228)
+### put · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L197)
 
 Stores a key-value pair in the database within the current transaction.
 
@@ -419,7 +419,7 @@ Stores a key-value pair in the database within the current transaction.
 - With code "KEY_TOO_LONG" if key exceeds maximum allowed length.
 - With code "LMDB-{code}" for LMDB-specific errors.
 
-### del · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L241)
+### del · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L210)
 
 Deletes a key-value pair from the database within the current transaction.
 
@@ -436,10 +436,10 @@ Deletes a key-value pair from the database within the current transaction.
 - With code "KEY_TOO_LONG" if key exceeds maximum allowed length.
 - With code "LMDB-{code}" for LMDB-specific errors.
 
-### init · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L260)
+### init · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L229)
 
 Initialize the database with the specified directory path.
-This function may only be called once. If it is not called before the first transact(),
+This function may be called multiple times with the same parameters. If it is not called before the first transact(),
 the database will be automatically initialized with the default directory.
 
 **Signature:** `(dbDir?: string) => void`
@@ -450,7 +450,7 @@ the database will be automatically initialized with the default directory.
 
 **Throws:**
 
-- With code "DUP_INIT" if database is already initialized.
+- With code "INCONSISTENT_INIT" if database is already initialized with different parameters.
 - With code "CREATE_DIR_FAILED" if directory creation fails.
 - With code "LMDB-{code}" for LMDB-specific errors.
 
@@ -460,7 +460,7 @@ the database will be automatically initialized with the default directory.
 init("./my-database");
 ```
 
-### onRevert · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L272)
+### onRevert · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L241)
 
 Registers a callback to be executed when the current transaction is reverted (aborted due to error).
 The callback will be executed outside of transaction context.
@@ -475,7 +475,7 @@ The callback will be executed outside of transaction context.
 
 - If called outside of a transaction context
 
-### onCommit · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L284)
+### onCommit · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L253)
 
 Registers a callback to be executed when the current transaction commits successfully.
 The callback will be executed outside of transaction context.
@@ -490,7 +490,7 @@ The callback will be executed outside of transaction context.
 
 - If called outside of a transaction context
 
-### transact · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L317)
+### transact · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L286)
 
 Executes a function within a database transaction context.
 
@@ -531,7 +531,7 @@ const result = await transact(() => {
 });
 ```
 
-### scan · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L456)
+### scan · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L425)
 
 Creates an iterator to scan through database entries within the current transaction.
 
@@ -591,7 +591,7 @@ await transact(() => {
 });
 ```
 
-### asArray · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L480)
+### asArray · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L449)
 
 Converts an ArrayBuffer to a Uint8Array.
 Helper function for use with scan() keyConvert and valueConvert options.
@@ -604,7 +604,7 @@ Helper function for use with scan() keyConvert and valueConvert options.
 
 **Returns:** A new Uint8Array view of the buffer.
 
-### asBuffer · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L489)
+### asBuffer · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L458)
 
 Returns the ArrayBuffer as-is.
 Helper function for use with scan() keyConvert and valueConvert options.
@@ -617,7 +617,7 @@ Helper function for use with scan() keyConvert and valueConvert options.
 
 **Returns:** The same ArrayBuffer.
 
-### asString · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L498)
+### asString · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L467)
 
 Converts an ArrayBuffer to a UTF-8 decoded string.
 Helper function for use with scan() keyConvert and valueConvert options.
@@ -630,7 +630,7 @@ Helper function for use with scan() keyConvert and valueConvert options.
 
 **Returns:** A UTF-8 decoded string.
 
-### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L180)
+### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L166)
 
 The DatabaseError class is used to represent errors that occur during database operations.
 It extends the built-in Error class and has a machine readable error code string property.
@@ -647,7 +647,7 @@ Can be a Uint8Array, ArrayBuffer, or string.
 
 **Type:** `Uint8Array | ArrayBuffer | string`
 
-### DbEntry · [interface](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L342)
+### DbEntry · [interface](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L311)
 
 Represents a key-value pair returned by the iterator
 
@@ -656,15 +656,15 @@ Represents a key-value pair returned by the iterator
 - `K`
 - `V`
 
-#### dbEntry.key · [member](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L343)
+#### dbEntry.key · [member](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L312)
 
 **Type:** `K`
 
-#### dbEntry.value · [member](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L344)
+#### dbEntry.value · [member](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L313)
 
 **Type:** `V`
 
-### DbIterator · [class](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L350)
+### DbIterator · [class](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L319)
 
 Database iterator that implements the standard TypeScript iterator protocol
 
@@ -673,26 +673,26 @@ Database iterator that implements the standard TypeScript iterator protocol
 - `K`
 - `V`
 
-#### dbIterator.iteratorId · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L351)
+#### dbIterator.iteratorId · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L320)
 
 **Type:** `number`
 
-#### dbIterator.convertKey · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L352)
+#### dbIterator.convertKey · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L321)
 
 **Type:** `(buffer: ArrayBuffer) => K`
 
-#### dbIterator.convertValue · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L353)
+#### dbIterator.convertValue · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L322)
 
 **Type:** `(buffer: ArrayBuffer) => V`
 
-#### dbIterator.[Symbol.iterator] · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L361)
+#### dbIterator.[Symbol.iterator] · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L330)
 
 **Signature:** `() => DbIterator<K, V>`
 
 **Parameters:**
 
 
-#### dbIterator.next · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L372)
+#### dbIterator.next · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L341)
 
 Advances the iterator to the next key-value pair.
 
@@ -708,7 +708,7 @@ Advances the iterator to the next key-value pair.
 - With code "INVALID_ITERATOR" if iterator is invalid or already closed.
 - With code "LMDB-{code}" for LMDB-specific errors.
 
-#### dbIterator.close · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L396)
+#### dbIterator.close · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L365)
 
 Closes the iterator and frees its resources.
 Should be called when done iterating to prevent resource leaks.
@@ -728,17 +728,16 @@ The low-level API is what's exposed by the native module. It's a somewhat less c
 
 The following is auto-generated from `src/lowlevel.ts`:
 
-### init · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L33)
+### init · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L32)
 
 Initializes the database system with the specified directory.
 
-**Signature:** `(onCommit: (transactionId: number, commitSeq: number) => void, directory?: string, commitWorkerBin?: string) => void`
+Can be called multiple times if directory and commitWorkerBin are identical.
+
+**Signature:** `(directory?: string, commitWorkerBin?: string) => void`
 
 **Parameters:**
 
-- `onCommit: (transactionId: number, commitSeq: number) => void` - Callback function that will be invoked when an asynchronous 
-transaction commit completes. The callback receives the transaction ID and
-the commit sequence number (0 when the transaction failed).
 - `directory?: string` - Optional path to the database directory. If not provided,
 defaults to the OLMDB_DIR environment variable or "./.olmdb".
 - `commitWorkerBin: string` (optional) - Path to the commit worker binary. Defaults to
@@ -748,7 +747,7 @@ defaults to the OLMDB_DIR environment variable or "./.olmdb".
 
 - DatabaseError if initialization fails
 
-### startTransaction · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L47)
+### startTransaction · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L45)
 
 Starts a new transaction for database operations.
 
@@ -760,28 +759,27 @@ Starts a new transaction for database operations.
 
 - DatabaseError if the transaction cannot be created
 
-### commitTransaction · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L61)
+### commitTransaction · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L58)
 
 Commits the transaction with the given ID.
 
-If the transaction is read-only, commit will complete immediately and return true.
-If the transaction has modifications, it will be queued for asynchronous commit and return false.
-When the commit is processed, the onCommit callback provided to init() will be invoked.
+If the transaction is read-only, returns the commit sequence number immediately.
+If the transaction has modifications, returns a Promise that resolves to the commit sequence when the commit completes.
 
-**Signature:** `(transactionId: number) => number`
+**Signature:** `(transactionId: number) => number | Promise<number>`
 
 **Parameters:**
 
 - `transactionId` - The ID of the transaction to commit
 
-**Returns:** For read-only transactions: the commit sequence number
-For read/write: 0 (commit will be async)
+**Returns:** For read-only transactions: the commit sequence number (synchronous)
+For write transactions: a Promise that resolves to the commit sequence number (0 when the transaction failed due to conflicts)
 
 **Throws:**
 
 - DatabaseError if the transaction cannot be committed
 
-### abortTransaction · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L69)
+### abortTransaction · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L66)
 
 Aborts the transaction with the given ID, discarding all changes.
 
@@ -795,7 +793,7 @@ Aborts the transaction with the given ID, discarding all changes.
 
 - DatabaseError if the transaction cannot be aborted
 
-### get · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L79)
+### get · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L76)
 
 Retrieves a value for the given key within a transaction.
 
@@ -812,7 +810,7 @@ Retrieves a value for the given key within a transaction.
 
 - DatabaseError if the operation fails
 
-### put · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L92)
+### put · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L89)
 
 Stores a key-value pair within a transaction.
 
@@ -828,7 +826,7 @@ Stores a key-value pair within a transaction.
 
 - DatabaseError if the operation fails
 
-### del · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L105)
+### del · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L102)
 
 Deletes a key-value pair within a transaction.
 
@@ -843,7 +841,7 @@ Deletes a key-value pair within a transaction.
 
 - DatabaseError if the operation fails
 
-### createIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L120)
+### createIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L117)
 
 Creates an iterator for scanning a range of keys within a transaction.
 
@@ -862,7 +860,7 @@ Creates an iterator for scanning a range of keys within a transaction.
 
 - DatabaseError if the operation fails
 
-### readIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L134)
+### readIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L131)
 
 Reads the next key-value pair from an iterator.
 
@@ -878,7 +876,7 @@ Reads the next key-value pair from an iterator.
 
 - DatabaseError if the operation fails
 
-### closeIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L144)
+### closeIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L141)
 
 Closes an iterator when it's no longer needed.
 
@@ -892,7 +890,7 @@ Closes an iterator when it's no longer needed.
 
 - DatabaseError if the operation fails
 
-### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L181)
+### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L178)
 
 The DatabaseError class is used to represent errors that occur during database operations.
 It extends the built-in Error class and has a machine readable error code string property.
@@ -902,15 +900,15 @@ Invalid function arguments will throw TypeError.
 
 **Value:** `DatabaseErrorConstructor`
 
-### DatabaseErrorConstructor · [interface](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L163)
+### DatabaseErrorConstructor · [interface](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L160)
 
 Constructor interface for DatabaseError.
 
-#### databaseErrorConstructor.new · [constructor](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L170)
+#### databaseErrorConstructor.new · [constructor](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L167)
 
 Creates a new DatabaseError with the specified message and code.
 
-#### databaseErrorConstructor.prototype · [member](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L171)
+#### databaseErrorConstructor.prototype · [member](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L168)
 
 **Type:** `DatabaseError`
 

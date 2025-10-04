@@ -18,7 +18,6 @@ type Transaction = {
     resolve: (value: any) => void;
     reject: (reason: any) => void;
     id: number;
-    result?: any;
     retryCount: number;
     onCommitCallbacks?: Array<(txId: number) => void>;
     onRevertCallbacks?: Array<(txId: number) => void>;
@@ -44,79 +43,49 @@ function runCallbacks(txn: Transaction, callbackList: "onRevertCallbacks" | "onC
     delete txn.onRevertCallbacks;
 }
 
-// Track pending transactions by ID
-const pendingTransactions = new Map<number, Transaction>();
 // Track if database has been initialized
 let isInitialized = false;
 
-// Global commit handler that will be passed to lowlevel.init
-function globalCommitHandler(transactionId: number, commitSeq: number): void {
-    const txn = pendingTransactions.get(transactionId);
-    if (!txn) {
-        console.warn(`Received commit for unknown transaction ${transactionId}`);
-        return;
-    }
+async function tryTransaction(txn: Transaction) {
+    txn.id = lowlevel.startTransaction();
+    assert(txn.id >= 0, "Transaction ID should be valid 1");
     
-    pendingTransactions.delete(transactionId);
+    let result;
+    const commitSeq = await transactionStorage.run(txn, async () => {
+        try {
+            result = await txn.fn();
+        } catch (e) {
+            await lowlevel.abortTransaction(txn.id);
+            return e;
+        }
+        try {
+            return await lowlevel.commitTransaction(txn.id);
+        } catch (e) {
+            return e;
+        }    
+    });
+        
+    // Handle the commit result (either number or Promise<number>)
     txn.id = -1; // Mark as done
     
-    if (commitSeq) {
+    if (typeof commitSeq === 'number' && commitSeq > 0) {
         // Execute onCommit callbacks outside transaction context
         runCallbacks(txn, "onCommitCallbacks", commitSeq);
-        
-        txn.resolve(txn.result);
+        txn.resolve(result);
     } else {
         // Execute onRevert callbacks for retry failure
         runCallbacks(txn, "onRevertCallbacks", 0);
         
-        // Attempt retry if transaction failed due to conflicts
         txn.retryCount++;
-        if (txn.retryCount > 6) {
+        if (commitSeq !== 0) {
+            txn.reject(commitSeq); // An error was thrown
+        } else if (++txn.retryCount > 6) {
             txn.reject(new lowlevel.DatabaseError("Transaction keeps getting raced", "RACING_TRANSACTION"));
         } else {
             console.log(`Retrying raced transaction (${txn.retryCount}/6)`);
             tryTransaction(txn); // Retry the transaction
         }
     }
-}
-
-async function tryTransaction(txn: Transaction) {
-    txn.id = lowlevel.startTransaction();
-    assert(txn.id >= 0, "Transaction ID should be valid 1");
-    pendingTransactions.set(txn.id, txn);
-    
-    let error: any = null;
-    let commitSeq: number = 0;
-    
-    await transactionStorage.run(txn, async () => {
-        assert(txn.id >= 0, "Transaction ID should be valid 2");
-        try {
-            assert(txn.id >= 0, "Transaction ID should be valid 2a");
-            txn.result = await txn.fn();
-            assert(txn.id >= 0, "Transaction ID should be valid 2b");
-        } catch(err) {
-            error = err;
-            lowlevel.abortTransaction(txn.id);
-            return;
-        }
-
-        assert(txn.id >= 0, "Transaction ID should be valid 3");
-        commitSeq = lowlevel.commitTransaction(txn.id);
-        // Note: Don't execute callbacks here as we're still within transaction context
-    });
-    
-    if (error || commitSeq) {        
-        pendingTransactions.delete(txn.id);
-        txn.id = -1;
-        if (error) {
-            runCallbacks(txn, "onRevertCallbacks", 0);
-            txn.reject(error);
-        } else {
-            runCallbacks(txn, "onCommitCallbacks", commitSeq);
-            txn.resolve(txn.result);
-        }
-    }
-    // else: globalCommitHandler will be called later
 }
 
 const transactionStorage = new AsyncLocalStorage<Transaction|undefined>();
@@ -244,11 +213,11 @@ export function del(key: Data): void {
 
 /**
  * Initialize the database with the specified directory path.
- * This function may only be called once. If it is not called before the first transact(),
+ * This function may be called multiple times with the same parameters. If it is not called before the first transact(),
  * the database will be automatically initialized with the default directory.
  * 
  * @param dbDir - Optional directory path for the database (defaults to environment variable $OLMDB_DIR or "./.olmdb").
- * @throws {DatabaseError} With code "DUP_INIT" if database is already initialized.
+ * @throws {DatabaseError} With code "INCONSISTENT_INIT" if database is already initialized with different parameters.
  * @throws {DatabaseError} With code "CREATE_DIR_FAILED" if directory creation fails.
  * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
  * 
@@ -259,7 +228,7 @@ export function del(key: Data): void {
  */
 export function init(dbDir?: string): void {
     isInitialized = true;
-    lowlevel.init(globalCommitHandler, dbDir);
+    lowlevel.init(dbDir);
 }
 
 /**

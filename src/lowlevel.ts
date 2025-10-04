@@ -13,7 +13,8 @@ const PACKAGE_ROOT = (function() {
   throw new Error('package.json not found');
 })();
 
-const BIN_DIR = resolve(PACKAGE_ROOT, 'build', 'Release');
+// Take from OLMDB_BIN_DIR, or default to <package_root>/build/release
+const BIN_DIR = process.env.OLMDB_BIN_DIR || resolve(PACKAGE_ROOT, 'build', 'Release');
 
 const lowlevel = {} as any;
 dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.dlopen.RTLD_NOW);
@@ -21,9 +22,8 @@ dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.d
 /**
  * Initializes the database system with the specified directory.
  * 
- * @param onCommit Callback function that will be invoked when an asynchronous 
- *   transaction commit completes. The callback receives the transaction ID and
- *   the commit sequence number (0 when the transaction failed).
+ * Can be called multiple times if directory and commitWorkerBin are identical.
+ * 
  * @param directory Optional path to the database directory. If not provided,
  *   defaults to the OLMDB_DIR environment variable or "./.olmdb".
  * @param commitWorkerBin Path to the commit worker binary. Defaults to
@@ -31,11 +31,10 @@ dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.d
  * @throws DatabaseError if initialization fails
  */
 export function init(
-  onCommit: (transactionId: number, commitSeq: number) => void,
   directory?: string,
   commitWorkerBin: string = `${BIN_DIR}/commit_worker`
 ): void {
-  lowlevel.init(onCommit, directory, commitWorkerBin);
+  lowlevel.init(directory, commitWorkerBin);
 }
 
 /**
@@ -49,16 +48,15 @@ export const startTransaction = lowlevel.startTransaction as () => number;
 /**
  * Commits the transaction with the given ID.
  * 
- * If the transaction is read-only, commit will complete immediately and return true.
- * If the transaction has modifications, it will be queued for asynchronous commit and return false.
- * When the commit is processed, the onCommit callback provided to init() will be invoked.
+ * If the transaction is read-only, returns the commit sequence number immediately.
+ * If the transaction has modifications, returns a Promise that resolves to the commit sequence when the commit completes.
  * 
  * @param transactionId The ID of the transaction to commit
- * @returns For read-only transactions: the commit sequence number
- *          For read/write: 0 (commit will be async)
+ * @returns For read-only transactions: the commit sequence number (synchronous)
+ *          For write transactions: a Promise that resolves to the commit sequence number (0 when the transaction failed due to conflicts)
  * @throws DatabaseError if the transaction cannot be committed
  */
-export const commitTransaction = lowlevel.commitTransaction as (transactionId: number) => number;
+export const commitTransaction = lowlevel.commitTransaction as (transactionId: number) => number | Promise<number>;
 
 /**
  * Aborts the transaction with the given ID, discarding all changes.

@@ -1,6 +1,6 @@
 import * as olmdb from 'olmdb';
 
-export async function run({ db_dir, value_size, gets_per_transaction, puts_per_transaction, tasks_per_thread, key_count, duration, seed }) {
+export async function run({ db_dir, value_size, gets_per_transaction, puts_per_transaction, tasks_per_thread, key_count, duration, seed }: any) {
 
     // It appears that Bun does not automatically reseed the random number generator
     // when forking, so we need to set it manually to prevent each worker from
@@ -8,7 +8,7 @@ export async function run({ db_dir, value_size, gets_per_transaction, puts_per_t
     try {
         let jsc = await import("bun:jsc");
         jsc.setRandomSeed(seed);
-    } catch (err) {
+    } catch (err: any) {
         console.log("Could not import bun:jsc:", err.message);
     }
 
@@ -17,11 +17,7 @@ export async function run({ db_dir, value_size, gets_per_transaction, puts_per_t
     for(let i=0; i<10; i++) {
         putValues.push(new Uint8Array(value_size).fill((''+i).charCodeAt(0)));
     }
-    try {
-        olmdb.init(db_dir);
-    } catch(e: any) {
-        if (e.code !== "DUP_INIT") throw e;
-    }
+    olmdb.init(db_dir);
 
     let transactions = 0;
     let tries = 0;

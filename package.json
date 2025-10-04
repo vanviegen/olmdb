@@ -1,6 +1,6 @@
 {
   "name": "olmdb",
-  "version": "0.2.19",
+  "version": "0.3.0",
   "description": "Optimistic LMDB. A very fast embedded key/value store featuring ACID optimistic read/write-transactions, based on LMDB.",
   "type": "module",
   "exports": {
@@ -28,6 +28,7 @@
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",
     "test:node": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js --verbose --silent --runInBand",
+    "test:native": "gcc -o tests/native.out tests/native.c lowlevel/transaction_client.c vendor/lmdb/mdb.c vendor/lmdb/midl.c -I. -Ivendor/lmdb -lpthread -g -O0 -DDEBUG && ./tests/native.out",
     "readme-tsdoc": "readme-tsdoc --repo-url https://github.com/vanviegen/olmdb",
     "prepack": "npm run build && npm run test && npm run readme-tsdoc"
   },

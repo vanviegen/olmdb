@@ -1,13 +1,7 @@
 import { init, put, get, getString, transact, del, scan, asString, DatabaseError, onRevert, onCommit, setTransactionData, getTransactionData } from '../src/olmdb.js';
 import { expect, test, describe, beforeEach } from "@jest/globals";
 
-try {
-    init("./.olmdb_test");
-} catch (error: any) {
-    if (error.code !== "DUP_INIT") {
-        throw error; // Rethrow if it's not the expected error
-    }
-}
+init("./.olmdb_test");
 
 let state: string = 'initial';
 const waiters: Map<string, Array<() => void>> = new Map();

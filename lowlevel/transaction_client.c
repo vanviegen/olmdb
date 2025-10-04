@@ -35,7 +35,6 @@
 // Configuration constants
 #define SHARED_MEMORY_SIZE (4ULL * 1024 * 1024 * 1024) // 4 GB shared memory size
 #define LOG_BUFFER_BLOCK_SIZE (64 * 1024)
-#define MAX_LTXNS 0x100000
 #define MAX_ITERATORS 0x100000
 #define MAX_KEY_LENGTH 511
 #define SKIPLIST_DEPTH 4
@@ -95,8 +94,8 @@ static char *shared_memory_unused_start;
 static char *shared_memory_unused_end;
 static int commit_worker_fd = -1;
 static int mmap_fd = -1;
-char db_dir[PATH_MAX];
-char *commit_worker_bin;
+char *db_dir = NULL;
+char *commit_worker_bin = NULL;
 void (*set_signal_fd_callback)(int fd) = NULL;
 
 // Prototypes for internal functions
@@ -153,6 +152,11 @@ log_buffer_t *allocate_shared_memory_blocks(uint32_t blocks) {
         } else {
             // Allocate a new single block buffer at the end of the shared memory
             shared_memory_unused_end -= LOG_BUFFER_BLOCK_SIZE;
+            if (shared_memory_unused_end < shared_memory_unused_start) {
+                SET_ERROR("OOM", "Maximum transaction size exceeded, allocating a single block");
+                shared_memory_unused_end += LOG_BUFFER_BLOCK_SIZE;
+                return NULL;
+            }
             log_buffer_t *new_buf = (log_buffer_t *)shared_memory_unused_end;
             new_buf->blocks = 1;
             new_buf->free = 0;
@@ -190,7 +194,7 @@ log_buffer_t *allocate_shared_memory_blocks(uint32_t blocks) {
     log_buffer_t *new_buf = (log_buffer_t *)shared_memory_unused_start;
     shared_memory_unused_start += LOG_BUFFER_BLOCK_SIZE * blocks;
     if (shared_memory_unused_start > shared_memory_unused_end) {
-        SET_ERROR("OOM", "Not enough shared memory for %u blocks of size %d bytes", blocks, LOG_BUFFER_BLOCK_SIZE);
+        SET_ERROR("OOM", "Maximum transaction size exceeded, allocating %u blocks", blocks);
         return NULL;
     }
     new_buf->blocks = blocks;
@@ -220,6 +224,7 @@ static void *allocate_log_space(ltxn_t *ltxn, size_t needed_space) {
         uint32_t blocks = (needed_space + 7 /* for alignment */ + sizeof(log_buffer_t) + LOG_BUFFER_BLOCK_SIZE - 1) / LOG_BUFFER_BLOCK_SIZE;
         
         log_buffer_t *new_buf = allocate_shared_memory_blocks(blocks);
+        if (!new_buf) return NULL;
 
         new_buf->next = ltxn->first_log_buffer;
         ltxn->first_log_buffer = new_buf;
@@ -236,7 +241,7 @@ static void *allocate_log_space(ltxn_t *ltxn, size_t needed_space) {
 
 static read_log_t *create_read_log(ltxn_t *ltxn, size_t size, int32_t row_count) {    
     read_log_t *read_log = allocate_log_space(ltxn, size);
-    ASSERT_OR_RETURN(read_log != NULL, NULL);
+    if (!read_log) return NULL;
     
     // Initialize the read log entry
     read_log->next_ptr = NULL;
@@ -480,13 +485,13 @@ static update_log_t *find_last_update_log(ltxn_t *ltxn) {
     return (update_log_t *)next_ptrs;
 }
 
-static void add_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data, uint32_t value_size, const char *value_data) {
+static int add_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data, uint32_t value_size, const char *value_data) {
     int size = sizeof(update_log_t) + (int)key_size + value_size;
     // Align to 4 bytes for update_log_t as per the new alignment requirement
     size = (size + 3) & ~3;
     
     update_log_t *new_log = allocate_log_space(ltxn, size);
-    if (!new_log) return;
+    if (!new_log) return -1;
     
     new_log->key_size = key_size;
     new_log->value_size = value_size;
@@ -537,6 +542,8 @@ static void add_update_log(ltxn_t *ltxn, uint16_t key_size, const char *key_data
         // (We can't just replace the old item, as the value length may have increased.)
         delete_update_log(ltxn, new_log->next_ptrs[0]);
     }
+
+    return 0;
 }
 
 static void delete_update_log(ltxn_t *ltxn, update_log_t *log) {
@@ -631,7 +638,7 @@ static int send_fd(int sockfd, int fd)
     return 0;
 }
 
-static void start_commit_worker(int socket_fd, const char *db_dir) {
+static void start_commit_worker(int socket_fd) {
     pid_t pid = fork();
     if (pid < 0) {
         LOG_INTERNAL_ERROR("Failed to fork server process: %s", strerror(errno));
@@ -656,7 +663,7 @@ static void start_commit_worker(int socket_fd, const char *db_dir) {
         close(socket_fd);
     }
 
-    execv(commit_worker_bin, (char *[]){"commit_worker", (char *)db_dir, NULL});
+    execv(commit_worker_bin, (char *[]){"commit_worker", db_dir, NULL});
     // If execv fails, log the error and exit
     LOG_INTERNAL_ERROR("Failed to exec commit worker: %s", strerror(errno));
     _exit(1);
@@ -667,6 +674,11 @@ static int connect_to_commit_worker() {
     
     // Get the inode of data.mdb to uniquely identify this database
     char data_mdb_path[PATH_MAX];
+    size_t db_dir_len = strlen(db_dir);
+    if (db_dir_len + 10 >= PATH_MAX) {
+        SET_ERROR("PATH_TOO_LONG", "Database directory path is too long");
+        return -1;
+    }
     snprintf(data_mdb_path, sizeof(data_mdb_path), "%s/data.mdb", db_dir);
     
     // Ensure directory exists
@@ -702,7 +714,7 @@ static int connect_to_commit_worker() {
 
         // First try to bind, see if we can become the server
         if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-            start_commit_worker(fd, db_dir);
+            start_commit_worker(fd);
             usleep(50000); // 50ms to allow the server to start (if that's not enough the retry will come to the rescue)
             close(fd);
             continue; // Now try to connect to the server
@@ -763,18 +775,11 @@ void reconnect_commit_worker() {
 }
 
 int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_fd)(int fd)) {
-    if (dbenv) {
-        SET_ERROR("DUP_INIT", "Database is already init");
-        return -1;
-    }
-
-    set_signal_fd_callback = set_signal_fd;
-    
+    // Read $OLMDB_DIR environment variable or use default './.olmdb' if no directory specified
     if (!_db_dir || !_db_dir[0]) {
-        // Read $OLMDB_DIR environment variable or use default './.olmdb'
         _db_dir = getenv("OLMDB_DIR");
         if (!_db_dir || !_db_dir[0]) {
-            _db_dir = "./.olmdb"; // Default directory
+            _db_dir = "./.olmdb";
         }
     }
 
@@ -784,15 +789,34 @@ int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_
         return -1;
     }
 
-    if (realpath(_db_dir, db_dir)==NULL) {
-        SET_ERROR("CREATE_DIR_FAILED", "Failed to resolve database directory '%s': %s", _db_dir, strerror(errno));
+    // Resolve to absolute path
+    char resolved_path[PATH_MAX];
+    if (realpath(_db_dir, resolved_path) == NULL) {
+        SET_ERROR("INCONSISTENT_INIT", "Failed to resolve database directory '%s': %s", _db_dir, strerror(errno));
         return -1;
     }
+
+    if (dbenv) {
+        // Database is already initialized, check if parameters match
+        if (strcmp(resolved_path, db_dir) != 0 || strcmp(_commit_worker_bin, commit_worker_bin) != 0) {
+            SET_ERROR("INCONSISTENT_INIT", "Database already initialized with different parameters");
+            return -1;
+        }
+        
+        // Parameters match, return success
+        return 0;
+    }
+
+    set_signal_fd_callback = set_signal_fd;
 
     if (access(_commit_worker_bin, X_OK) != 0) {
         SET_ERROR("NO_COMMIT_WORKER", "Commit worker binary '%s' is not executable: %s", _commit_worker_bin, strerror(errno));
         return -1;
     }
+
+    // Store the resolved database directory
+    db_dir = strdup(resolved_path);
+    commit_worker_bin = strdup(_commit_worker_bin);
 
     if (init_lmdb(db_dir) < 0) return -1; // Error already set
 
@@ -820,7 +844,6 @@ int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_
     ltxns = (ltxn_t *)((uintptr_t)(shared_memory + SHARED_MEMORY_SIZE - sizeof(ltxn_t) * MAX_LTXNS) & ~4095); // Align to 4kb
     shared_memory_unused_end = (char *)ltxns;
 
-    commit_worker_bin = strdup(_commit_worker_bin);
     commit_worker_fd = connect_to_commit_worker();
     if (commit_worker_fd < 0) return -1; // Error already set
 
@@ -856,7 +879,7 @@ int put(int ltxn_id, const void *key_data, size_t key_size, const void *value_da
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
     if (!ltxn) return -1; // Error already set
     
-    add_update_log(ltxn, key_size, key_data, value_size, value_data);
+    if (add_update_log(ltxn, key_size, key_data, value_size, value_data) < 0) return -1; // Error already set
     ltxn->has_writes = 1;
     
     return 0;
@@ -876,7 +899,7 @@ int del(int ltxn_id, const void *key_data, size_t key_size) {
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
     if (!ltxn) return -1; // Error already set
     
-    add_update_log(ltxn, key_size, key_data, 0, NULL);
+    if (add_update_log(ltxn, key_size, key_data, 0, NULL) < 0) return -1; // Error already set
     ltxn->has_writes = 1;
     
     return 0;
@@ -921,12 +944,10 @@ int get(int ltxn_id, const void *key_data, size_t key_size, void **value_data, s
 
     if (rc == MDB_SUCCESS || rc == MDB_NOTFOUND) {
         read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + key_size, 0);
-        ASSERT(read_log);
-        if (read_log) {
-            read_log->checksum = (rc == MDB_NOTFOUND) ? 0 : checksum(value.mv_data, value.mv_size, CHECKSUM_INITIAL);
-            read_log->key_size = key_size;
-            memcpy(read_log->key_data, key_data, key_size);
-        }
+        if (!read_log) return -1; // Error already set
+        read_log->checksum = (rc == MDB_NOTFOUND) ? 0 : checksum(value.mv_data, value.mv_size, CHECKSUM_INITIAL);
+        read_log->key_size = key_size;
+        memcpy(read_log->key_data, key_data, key_size);
     }
 
     if (rc == EINVAL) {
@@ -998,7 +1019,7 @@ int create_iterator(int ltxn_id,
     // Create read log with row_count indicating direction (positive for forward, negative for backward)
     read_log_t *read_log = create_read_log(ltxn, sizeof(read_log_t) + start_key_size, reverse ? -1 : 1);
     if (!read_log) {
-        SET_ERROR("OOM", "Failed to allocate memory for read log");
+        // Error already set
         return -1;
     }
         

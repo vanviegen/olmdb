@@ -5,6 +5,11 @@
 #include <stddef.h>
 
 /**
+ * Maximum number of logical transactions that can be active at the same time.
+ */
+#define MAX_LTXNS 0x100000
+
+/**
  * @struct commit_result_t
  * @brief Structure containing the result of a transaction commit operation.
  * 
@@ -19,6 +24,8 @@ typedef struct {
 /**
  * @brief Initialize the database with the specified directory.
  *
+ * Can be called multiple times if directory and commit_worker_bin are identical.
+ *
  * @param db_dir Path to the database directory, or NULL to use environment variable OLMDB_DIR or default "./.olmdb". Data from this pointer will be copied.
  * @param commit_worker_bin Path to the commit worker binary. Usually `<base_dir>/build/release/commit_worker`. Data from this pointer will be copied.
  * @param set_signal_fd Optional callback function to set and change the file descriptor for the commit worker connection.
@@ -27,11 +34,11 @@ typedef struct {
  * @return 0 on success.
  *         -1 on failure and sets error_code/error_message.
  * 
- * @error DUP_INIT           Database is already initialized.
+ * @error INCONSISTENT_INIT  Database already initialized with different directory or commit_worker_bin.
  * @error DIR_TOO_LONG       Database directory path exceeds maximum length.
  * @error CREATE_DIR_FAILED  Failed to create or open database directory.
  * @error OOM                Failed to allocate shared memory.
- * @error NO_COMMIT_WORKER          Failed to connect to commit worker after multiple attempts (see log file in db dir).
+ * @error NO_COMMIT_WORKER   Failed to connect to commit worker after multiple attempts (see log file in db dir).
  * @error LMDB*              Various LMDB errors (where * is the negative LMDB error code).
  */
 int init(const char *_db_dir, const char *_commit_worker_bin, void (*set_signal_fd)(int fd));
@@ -225,6 +232,19 @@ int drain_signal_fd(int blocking);
  *          2: Call again now, as there are more results ready than fit in the buffer.
  */
 int get_commit_results(commit_result_t *results, int *result_count);
+
+/**
+ * @brief Convert a transaction ID to a slot index for callback arrays.
+ * 
+ * Transaction IDs encode both an index and a nonce. This function extracts
+ * the index portion, which can be used as a slot in fixed-size arrays.
+ * 
+ * @param ltxn_id The transaction ID.
+ * @return The slot index (0 to MAX_LTXNS-1).
+ */
+static inline int ltxn_id_to_slot(int ltxn_id) {
+    return ltxn_id >> 12;
+}
 
 /**
  * Global error message buffer, set when functions return failure codes.

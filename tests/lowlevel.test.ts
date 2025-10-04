@@ -13,40 +13,9 @@ function arrayBufferToString(buffer: ArrayBuffer): string {
     return decoder.decode(buffer);
 }
 
-// Map to track pending transaction commits
-const pendingCommits = new Map<number, (commitSeq: number) => void>();
 
-// Returns 0 on error and the commitSeq on success
-function commitAndWait(transactionId: number): Promise<number> {
-    return new Promise((resolve) => {
-        // Store the resolver in our map
-        pendingCommits.set(transactionId, resolve);
-        
-        // Attempt to commit the transaction
-        const commitSeq = lowlevel.commitTransaction(transactionId);
+lowlevel.init("./.olmdb_test");
 
-        if (commitSeq) {
-            // Read-only transaction completed immediately
-            pendingCommits.delete(transactionId);
-            resolve(commitSeq);
-        }
-        // If not immediate, the onCommit callback will handle resolution
-    });
-}
-
-try {
-    // Initialize with global onCommit callback
-    lowlevel.init((transactionId: number, commitSeq: number) => {
-        // Resolve the corresponding promise
-        const pendingCommit = pendingCommits.get(transactionId);
-        if (pendingCommit) {
-            pendingCommit(commitSeq);
-            pendingCommits.delete(transactionId);
-        }
-    }, "./.olmdb_test");
-} catch (e: any) {
-    if (e.code !== "DUP_INIT") throw e;
-}
 
 describe('Lowlevel Tests', () => {
     beforeEach(async () => {
@@ -59,31 +28,31 @@ describe('Lowlevel Tests', () => {
             lowlevel.del(txnId, item.key);
         }
         lowlevel.closeIterator(iterId);
-        await commitAndWait(txnId);
+        await lowlevel.commitTransaction(txnId);
     });
     
     describe("CRUD Operations", () => {
         test("basic put/get/delete", async () => {
             // Test PUT operation
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("test1"), stringToArrayBuffer("value1"));
-            await commitAndWait(txnId);
+            const txn1 = lowlevel.startTransaction();
+            lowlevel.put(txn1, stringToArrayBuffer("test1"), stringToArrayBuffer("value1"));
+            await lowlevel.commitTransaction(txn1);
             
             // Verify PUT results
-            const readTxnId = lowlevel.startTransaction();
-            const value = lowlevel.get(readTxnId, stringToArrayBuffer("test1"));
+            const txn2 = lowlevel.startTransaction();
+            const value = lowlevel.get(txn2, stringToArrayBuffer("test1"));
             expect(value).toBeDefined();
             expect(arrayBufferToString(value!)).toBe("value1");
             
             // Test DELETE operation
-            lowlevel.del(readTxnId, stringToArrayBuffer("test1"));
-            await commitAndWait(readTxnId);
+            lowlevel.del(txn2, stringToArrayBuffer("test1"));
+            await lowlevel.commitTransaction(txn2);
             
             // Verify DELETE results
-            const verifyTxnId = lowlevel.startTransaction();
-            const deletedValue = lowlevel.get(verifyTxnId, stringToArrayBuffer("test1"));
+            const txn3 = lowlevel.startTransaction();
+            const deletedValue = lowlevel.get(txn3, stringToArrayBuffer("test1"));
             expect(deletedValue).toBeUndefined();
-            await commitAndWait(verifyTxnId);
+            await lowlevel.commitTransaction(txn3);
         });
     });
     
@@ -106,70 +75,70 @@ describe('Lowlevel Tests', () => {
             value = lowlevel.get(txnId, stringToArrayBuffer("test1"));
             expect(value).toBeUndefined();
             
-            await commitAndWait(txnId);
+            await lowlevel.commitTransaction(txnId);
         });
         
         test("concurrent validation", async () => {
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("test1"), stringToArrayBuffer("value1"));
-            lowlevel.put(txnId, stringToArrayBuffer("test2"), stringToArrayBuffer("value2"));
-            await commitAndWait(txnId);
+            const setupTxn = lowlevel.startTransaction();
+            lowlevel.put(setupTxn, stringToArrayBuffer("test1"), stringToArrayBuffer("value1"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("test2"), stringToArrayBuffer("value2"));
+            await lowlevel.commitTransaction(setupTxn);
             
             // First transaction setup
-            const txn1Id = lowlevel.startTransaction();
-            const value1 = lowlevel.get(txn1Id, stringToArrayBuffer("concurrent1"));
+            const txn1 = lowlevel.startTransaction();
+            const value1 = lowlevel.get(txn1, stringToArrayBuffer("concurrent1"));
             expect(value1).toBeUndefined();
             
             // Second transaction modification
-            const txn2Id = lowlevel.startTransaction();
-            lowlevel.put(txn2Id, stringToArrayBuffer("concurrent1"), stringToArrayBuffer("changed"));
-            await commitAndWait(txn2Id);
+            const txn2 = lowlevel.startTransaction();
+            lowlevel.put(txn2, stringToArrayBuffer("concurrent1"), stringToArrayBuffer("changed"));
+            await lowlevel.commitTransaction(txn2);
             
             // Validation failure check
-            lowlevel.put(txn1Id, stringToArrayBuffer("concurrent1"), stringToArrayBuffer("conflict"));
-            const success = await commitAndWait(txn1Id);
+            lowlevel.put(txn1, stringToArrayBuffer("concurrent1"), stringToArrayBuffer("conflict"));
+            const success = await lowlevel.commitTransaction(txn1);
             expect(success).toBe(0); // Expecting commit to fail
             
             // Final state verification
-            const finalTxnId = lowlevel.startTransaction();
-            const finalValue = lowlevel.get(finalTxnId, stringToArrayBuffer("concurrent1"));
+            const finalTxn = lowlevel.startTransaction();
+            const finalValue = lowlevel.get(finalTxn, stringToArrayBuffer("concurrent1"));
             expect(arrayBufferToString(finalValue!)).toBe("changed");
-            await commitAndWait(finalTxnId);
+            await lowlevel.commitTransaction(finalTxn);
         });
         
         test("isolation level", async () => {
             // Setup uncommitted data in transaction 1
-            const txn1Id = lowlevel.startTransaction();
-            lowlevel.put(txn1Id, stringToArrayBuffer("test1"), stringToArrayBuffer("value1"));
+            const txn1 = lowlevel.startTransaction();
+            lowlevel.put(txn1, stringToArrayBuffer("test1"), stringToArrayBuffer("value1"));
             
             // Verify transaction 2 can't see uncommitted data
-            const txn2Id = lowlevel.startTransaction();
-            let value = lowlevel.get(txn2Id, stringToArrayBuffer("test1"));
+            const txn2 = lowlevel.startTransaction();
+            let value = lowlevel.get(txn2, stringToArrayBuffer("test1"));
             expect(value).toBeUndefined();
             
             // Commit transaction 1
-            await commitAndWait(txn1Id);
+            await lowlevel.commitTransaction(txn1);
             
             // Verify transaction 2 still can't see committed data (snapshot isolation)
-            value = lowlevel.get(txn2Id, stringToArrayBuffer("test1"));
+            value = lowlevel.get(txn2, stringToArrayBuffer("test1"));
             expect(value).toBeUndefined();
             
-            await commitAndWait(txn2Id);
+            await lowlevel.commitTransaction(txn2);
         });
     });
     
     describe("Iterator Operations", () => {
         test("forward scan", async () => {
             // Setup test data
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
-            lowlevel.put(txnId, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
-            lowlevel.put(txnId, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
-            await commitAndWait(txnId);
+            const setupTxn = lowlevel.startTransaction();
+            lowlevel.put(setupTxn, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
+            await lowlevel.commitTransaction(setupTxn);
             
             // Create iterator and scan forward
-            const readTxnId = lowlevel.startTransaction();
-            const iterId = lowlevel.createIterator(readTxnId);
+            const txnId = lowlevel.startTransaction();
+            const iterId = lowlevel.createIterator(txnId);
             
             let item = lowlevel.readIterator(iterId);
             expect(item).toBeDefined();
@@ -187,20 +156,20 @@ describe('Lowlevel Tests', () => {
             expect(item).toBeUndefined();
             
             lowlevel.closeIterator(iterId);
-            await commitAndWait(readTxnId);
+            await lowlevel.commitTransaction(txnId);
         });
         
         test("reverse scan", async () => {
             // Setup test data
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
-            lowlevel.put(txnId, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
-            lowlevel.put(txnId, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
-            await commitAndWait(txnId);
+            const setupTxn = lowlevel.startTransaction();
+            lowlevel.put(setupTxn, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
+            await lowlevel.commitTransaction(setupTxn);
             
             // Create reverse iterator
-            const readTxnId = lowlevel.startTransaction();
-            const iterId = lowlevel.createIterator(readTxnId, undefined, undefined, true);
+            const txnId = lowlevel.startTransaction();
+            const iterId = lowlevel.createIterator(txnId, undefined, undefined, true);
             
             let item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key5");
@@ -216,51 +185,51 @@ describe('Lowlevel Tests', () => {
             expect(item).toBeUndefined();
             
             lowlevel.closeIterator(iterId);
-            await commitAndWait(readTxnId);
+            await lowlevel.commitTransaction(txnId);
         });
         
         test("key positioning", async () => {
             // Setup test data
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
-            lowlevel.put(txnId, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
-            lowlevel.put(txnId, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
-            await commitAndWait(txnId);
+            const setupTxn = lowlevel.startTransaction();
+            lowlevel.put(setupTxn, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
+            await lowlevel.commitTransaction(setupTxn);
             
-            const readTxnId = lowlevel.startTransaction();
+            const txnId = lowlevel.startTransaction();
             
             // Forward positioning at existing key
-            let iterId = lowlevel.createIterator(readTxnId, stringToArrayBuffer("key3"));
+            let iterId = lowlevel.createIterator(txnId, stringToArrayBuffer("key3"));
             let item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key3");
             lowlevel.closeIterator(iterId);
             
             // Position at non-existent key (should find next key)
-            iterId = lowlevel.createIterator(readTxnId, stringToArrayBuffer("key2"));
+            iterId = lowlevel.createIterator(txnId, stringToArrayBuffer("key2"));
             item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key3");
             lowlevel.closeIterator(iterId);
             
             // Backward positioning
-            iterId = lowlevel.createIterator(readTxnId, stringToArrayBuffer("key4"), undefined, true);
+            iterId = lowlevel.createIterator(txnId, stringToArrayBuffer("key4"), undefined, true);
             item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key3");
             lowlevel.closeIterator(iterId);
             
-            await commitAndWait(readTxnId);
+            await lowlevel.commitTransaction(txnId);
         });
         
         test("visibility of transaction writes", async () => {
             // Setup initial committed data
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
-            lowlevel.put(txnId, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
-            await commitAndWait(txnId);
+            const setupTxn = lowlevel.startTransaction();
+            lowlevel.put(setupTxn, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
+            await lowlevel.commitTransaction(setupTxn);
             
             // Add uncommitted write and create iterator
-            const readTxnId = lowlevel.startTransaction();
-            lowlevel.put(readTxnId, stringToArrayBuffer("key2"), stringToArrayBuffer("value2"));
-            const iterId = lowlevel.createIterator(readTxnId);
+            const txnId = lowlevel.startTransaction();
+            lowlevel.put(txnId, stringToArrayBuffer("key2"), stringToArrayBuffer("value2"));
+            const iterId = lowlevel.createIterator(txnId);
             
             // Verify first committed record
             let item = lowlevel.readIterator(iterId);
@@ -268,7 +237,7 @@ describe('Lowlevel Tests', () => {
             expect(arrayBufferToString(item!.value)).toBe("value1");
             
             // Modify existing record
-            lowlevel.put(readTxnId, stringToArrayBuffer("key3"), stringToArrayBuffer("modified3"));
+            lowlevel.put(txnId, stringToArrayBuffer("key3"), stringToArrayBuffer("modified3"));
             
             // Verify uncommitted write is visible
             item = lowlevel.readIterator(iterId);
@@ -285,7 +254,7 @@ describe('Lowlevel Tests', () => {
             expect(item).toBeUndefined();
             
             lowlevel.closeIterator(iterId);
-            await commitAndWait(readTxnId);
+            await lowlevel.commitTransaction(txnId);
         });
         
         test("uncommitted changes visibility", async () => {
@@ -313,28 +282,28 @@ describe('Lowlevel Tests', () => {
             expect(item).toBeUndefined();
             
             lowlevel.closeIterator(iterId);
-            await commitAndWait(txnId);
+            await lowlevel.commitTransaction(txnId);
         });
         
         test("delete while iterating", async () => {
             // Setup test data
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
-            lowlevel.put(txnId, stringToArrayBuffer("key2"), stringToArrayBuffer("value2"));
-            lowlevel.put(txnId, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
-            lowlevel.put(txnId, stringToArrayBuffer("key4"), stringToArrayBuffer("value4"));
-            lowlevel.put(txnId, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
-            await commitAndWait(txnId);
+            const setupTxn = lowlevel.startTransaction();
+            lowlevel.put(setupTxn, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key2"), stringToArrayBuffer("value2"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key4"), stringToArrayBuffer("value4"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
+            await lowlevel.commitTransaction(setupTxn);
             
             // Iterate and delete all keys
-            const deleteTxnId = lowlevel.startTransaction();
-            const iterId = lowlevel.createIterator(deleteTxnId);
+            const txnId = lowlevel.startTransaction();
+            const iterId = lowlevel.createIterator(txnId);
             let iterationCount = 0;
             let item;
             
             while ((item = lowlevel.readIterator(iterId)) !== undefined) {
                 iterationCount++;
-                lowlevel.del(deleteTxnId, item.key);
+                lowlevel.del(txnId, item.key);
             }
             
             // Verify iteration count
@@ -342,37 +311,37 @@ describe('Lowlevel Tests', () => {
             lowlevel.closeIterator(iterId);
             
             // Verify uncommitted database is empty
-            const verifyIterId = lowlevel.createIterator(deleteTxnId);
+            const verifyIterId = lowlevel.createIterator(txnId);
             item = lowlevel.readIterator(verifyIterId);
             expect(item).toBeUndefined();
             lowlevel.closeIterator(verifyIterId);
             
-            await commitAndWait(deleteTxnId);
+            await lowlevel.commitTransaction(txnId);
             
             // Verify database is empty after commit
-            const finalTxnId = lowlevel.startTransaction();
-            const finalIterId = lowlevel.createIterator(finalTxnId);
+            const finalTxn = lowlevel.startTransaction();
+            const finalIterId = lowlevel.createIterator(finalTxn);
             item = lowlevel.readIterator(finalIterId);
             expect(item).toBeUndefined();
             lowlevel.closeIterator(finalIterId);
-            await commitAndWait(finalTxnId);
+            await lowlevel.commitTransaction(finalTxn);
         });
         
         test("end key bounds", async () => {
             // Setup test data
-            const txnId = lowlevel.startTransaction();
-            lowlevel.put(txnId, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
-            lowlevel.put(txnId, stringToArrayBuffer("key2"), stringToArrayBuffer("value2"));
-            lowlevel.put(txnId, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
-            lowlevel.put(txnId, stringToArrayBuffer("key4"), stringToArrayBuffer("value4"));
-            lowlevel.put(txnId, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
-            await commitAndWait(txnId);
+            const setupTxn = lowlevel.startTransaction();
+            lowlevel.put(setupTxn, stringToArrayBuffer("key1"), stringToArrayBuffer("value1"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key2"), stringToArrayBuffer("value2"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key3"), stringToArrayBuffer("value3"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key4"), stringToArrayBuffer("value4"));
+            lowlevel.put(setupTxn, stringToArrayBuffer("key5"), stringToArrayBuffer("value5"));
+            await lowlevel.commitTransaction(setupTxn);
             
-            const readTxnId = lowlevel.startTransaction();
+            const txnId = lowlevel.startTransaction();
             
             // Forward iteration with endKey
             let iterId = lowlevel.createIterator(
-                readTxnId,
+                txnId,
                 stringToArrayBuffer("key2"),
                 stringToArrayBuffer("key4")
             );
@@ -395,7 +364,7 @@ describe('Lowlevel Tests', () => {
             
             // Reverse iteration with endKey
             iterId = lowlevel.createIterator(
-                readTxnId,
+                txnId,
                 stringToArrayBuffer("key4"),
                 stringToArrayBuffer("key1"),
                 true
@@ -421,7 +390,7 @@ describe('Lowlevel Tests', () => {
             }
             
             lowlevel.closeIterator(iterId);
-            await commitAndWait(readTxnId);
+            await lowlevel.commitTransaction(txnId);
         });
     });
 });

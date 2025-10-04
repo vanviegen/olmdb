@@ -14,9 +14,11 @@
     } while (0)
 
 // References to JavaScript callbacks and objects
-static napi_ref on_commit_callback_ref = NULL;
 static napi_ref database_error_constructor = NULL;
 static napi_env global_env = NULL;
+
+// Storage for per-transaction promise deferreds
+static napi_deferred transaction_deferreds[MAX_LTXNS];
 
 static bool signal_job_running = false;
 static napi_async_work signal_job_work = NULL;
@@ -65,30 +67,29 @@ static void signal_job_complete(napi_env env, napi_status status, void* data) {
     napi_handle_scope scope;
     napi_open_handle_scope(env, &scope);
 
-    napi_value callback, undefined, args[2], result;
-    napi_get_undefined(env, &undefined);
-
-    if (on_commit_callback_ref) {
-        napi_get_reference_value(env, on_commit_callback_ref, &callback);
-    }
-
     int more_in_queue;
     do {
         int result_count = MAX_BATCH_SIZE;
         more_in_queue = get_commit_results(batch, &result_count);
         
-        if (on_commit_callback_ref) {
-            // Process this batch and call the callback for each result
-            for (int i = 0; i < result_count; i++) {
-                // Create the transaction ID argument
-                napi_create_int32(env, batch[i].ltxn_id, &args[0]);
-                // Create the commit_seq argument
+        // Process this batch and resolve the promise for each result
+        for (int i = 0; i < result_count; i++) {
+            int ltxn_id = batch[i].ltxn_id;
+            int callback_slot = ltxn_id_to_slot(ltxn_id);
+            
+            if (callback_slot >= 0 && callback_slot < MAX_LTXNS && transaction_deferreds[callback_slot]) {
+                // Create the commit_seq value
                 // We're wrapping at MAX_SAFE_INTEGER -- yes that sucks, as it may cause
                 // weirdness every once in a while on large installs. But it beats the
                 // alternative of losing precision and being wrong more and more over time.
-                napi_create_int64(env, batch[i].commit_seq & 0x1fffffffffffff, &args[1]);
-                // Call the JavaScript callback
-                napi_call_function(env, undefined, callback, 2, args, &result);
+                napi_value commit_seq_value;
+                napi_create_int64(env, batch[i].commit_seq & 0x1fffffffffffff, &commit_seq_value);
+                
+                // Resolve the promise
+                napi_resolve_deferred(env, transaction_deferreds[callback_slot], commit_seq_value);
+                
+                // Clean up the deferred
+                transaction_deferreds[callback_slot] = NULL;
             }
         }
     } while (more_in_queue == 2);
@@ -155,30 +156,19 @@ static napi_value create_database_error_class(napi_env env) {
 
 // NAPI wrapper functions
 napi_value js_init(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value argv[3];    
-    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 3) {
-        napi_throw_type_error(env, NULL, "Three arguments expected");
-        return NULL;
-    }
-
-    // Second argument should be a function callback, which we'll store
-    napi_valuetype arg_type;
-    if (napi_typeof(env, argv[0], &arg_type) != napi_ok || arg_type != napi_function) {
-        napi_throw_type_error(env, NULL, "Callback argument is not a function");
-        return NULL;
-    }
-    if (on_commit_callback_ref) napi_delete_reference(env, on_commit_callback_ref);
-    if (napi_create_reference(env, argv[0], 1, &on_commit_callback_ref) != napi_ok) {
-        napi_throw_error(env, NULL, "Failed to store callback reference");
+    size_t argc = 2;
+    napi_value argv[2];    
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 2) {
+        napi_throw_type_error(env, NULL, "Two arguments expected");
         return NULL;
     }
 
     // Get optional database directory
+    napi_valuetype arg_type;
     char db_dir[PATH_MAX];
     db_dir[0] = 0;
-    if (napi_get_value_string_utf8(env, argv[1], db_dir, sizeof(db_dir), NULL) != napi_ok) {
-        if (napi_typeof(env, argv[1], &arg_type) != napi_ok || (arg_type != napi_undefined && arg_type != napi_null)) {
+    if (napi_get_value_string_utf8(env, argv[0], db_dir, sizeof(db_dir), NULL) != napi_ok) {
+        if (napi_typeof(env, argv[0], &arg_type) != napi_ok || (arg_type != napi_undefined && arg_type != napi_null)) {
             napi_throw_type_error(env, NULL, "Database path must be a string or undefined");
             return NULL;
         }
@@ -186,7 +176,7 @@ napi_value js_init(napi_env env, napi_callback_info info) {
 
     // Get commit worker binary path
     char commit_worker_bin[PATH_MAX];
-    if (napi_get_value_string_utf8(env, argv[2], commit_worker_bin, sizeof(commit_worker_bin), NULL) != napi_ok) {
+    if (napi_get_value_string_utf8(env, argv[1], commit_worker_bin, sizeof(commit_worker_bin), NULL) != napi_ok) {
         napi_throw_type_error(env, NULL, "Commit worker binary path must be a string");
         return NULL;
     }
@@ -230,17 +220,47 @@ napi_value js_commit_transaction(napi_env env, napi_callback_info info) {
         napi_throw_type_error(env, NULL, "Expected transaction ID as integer");
         return NULL;
     }
-        
+    
     size_t commit_seq = commit_transaction(ltxn_id);
 
-    if (commit_seq == 0 && !signal_job_running) { // async result
+    // For read-only transactions (commit_seq > 0), return the number directly
+    if (commit_seq > 0) {
+        napi_value js_result;
+        // We're wrapping at MAX_SAFE_INTEGER -- yes that sucks, as it may cause
+        // weirdness every once in a while on large installs. But it beats the
+        // alternative of losing precision and being wrong more and more over time.
+        napi_create_int64(env, commit_seq & 0x1fffffffffffff, &js_result);
+        return js_result;
+    }
+    
+    // For async commits (commit_seq == 0), create and return a Promise
+    int callback_slot = ltxn_id_to_slot(ltxn_id);
+    if (callback_slot < 0 || callback_slot >= MAX_LTXNS) {
+        napi_throw_error(env, NULL, "Transaction ID out of range");
+        return NULL;
+    }
+    
+    // Clean up any existing deferred in this slot (shouldn't happen)
+    if (transaction_deferreds[callback_slot]) {
+        transaction_deferreds[callback_slot] = NULL;
+    }
+    
+    // Create a Promise and store the deferred
+    napi_value promise;
+    napi_deferred deferred;
+    if (napi_create_promise(env, &deferred, &promise) != napi_ok) {
+        napi_throw_error(env, NULL, "Failed to create promise");
+        return NULL;
+    }
+    
+    transaction_deferreds[callback_slot] = deferred;
+    
+    // Start the signal job if not already running
+    if (!signal_job_running) {
         start_signal_job();
     }
-
-    napi_value js_result;
-    // See comment about this int wrap in signal_job_complete
-    napi_create_int64(env, commit_seq & 0x1fffffffffffff, &js_result);
-    return js_result;
+    
+    return promise;
 }
 
 napi_value js_abort_transaction(napi_env env, napi_callback_info info) {
@@ -252,6 +272,16 @@ napi_value js_abort_transaction(napi_env env, napi_callback_info info) {
         napi_get_value_int32(env, argv[0], &ltxn_id) != napi_ok) {
         napi_throw_type_error(env, NULL, "Expected transaction ID as integer");
         return NULL;
+    }
+    
+    // Clean up any deferred for this transaction
+    int callback_slot = ltxn_id_to_slot(ltxn_id);
+    if (callback_slot >= 0 && callback_slot < MAX_LTXNS && transaction_deferreds[callback_slot]) {
+        // Reject the promise since we're aborting
+        napi_value error_msg;
+        napi_create_string_utf8(env, "Transaction aborted", NAPI_AUTO_LENGTH, &error_msg);
+        napi_reject_deferred(env, transaction_deferreds[callback_slot], error_msg);
+        transaction_deferreds[callback_slot] = NULL;
     }
     
     int result = abort_transaction(ltxn_id);

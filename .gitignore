@@ -1,7 +1,6 @@
-.olmdb
-.olmdb_test
-.olmdb_benchmark
+.olmdb*
 package-lock.json
 dist
 node_modules
 build
+tests/native.out
