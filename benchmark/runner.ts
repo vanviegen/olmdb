@@ -4,8 +4,7 @@ import * as olmdb from 'olmdb';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
-// @ts-ignore
-const benchmarkDir = (typeof import.meta === 'undefined') ? path.resolve(process.cwd(), "benchmark") : path.dirname(fileURLToPath(import.meta.url));
+const BENCHMARK_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -32,13 +31,13 @@ function parseArgs() {
             let [key, value]: (string|number|boolean)[] = arg.substring(2).split('=');
             key = key.replace(/-/g, '_'); // Convert dashes to underscores
             if (key in options) {
-                if (typeof options[key] === 'boolean') {
+                if (typeof (options as any)[key] === 'boolean') {
                     value = (value !== 'false' && value !== '0' && value !== 'no');
                 } else {
                     value ||= args[++i];
-                    if (typeof options[key] === 'number') value = parseInt(value, 10);
+                    if (typeof (options as any)[key] === 'number') value = parseInt(value, 10);
                 }
-                options[key] = value;
+                (options as any)[key] = value;
                 continue;
             }
         }
@@ -85,7 +84,7 @@ async function main() {
 
     const resultPromises: Promise<any>[] = [];
     console.warn(`Starting ${options.threads} threads with ${options.tasks_per_thread} tasks each for ${options.duration} seconds...`);
-    const workerPath = path.resolve(benchmarkDir, 'worker.ts');
+    const workerPath = path.resolve(BENCHMARK_DIR, 'worker.ts');
     if (options.threads > 1) {
         for (let i = 0; i < options.threads; i++) {
             const seed = (i * 0xdeadbeef) ^ i;

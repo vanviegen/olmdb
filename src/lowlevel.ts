@@ -1,12 +1,19 @@
 import * as os from "node:os";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { dlopen } from "process";
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+import { existsSync } from "node:fs";
 
-// @ts-ignore
-if (typeof __dirname === 'undefined') global.__dirname = (typeof import.meta === 'undefined') ? process.cwd() : path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const PACKAGE_ROOT = (function() {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (dir !== dirname(dir)) {
+    if (existsSync(resolve(dir, 'package.json'))) return dir;
+    dir = dirname(dir);
+  }
+  throw new Error('package.json not found');
+})();
 
-const BIN_DIR = process.env.OLMDB_BIN_DIR || path.resolve(`${__dirname}/../build/Release/`);
+const BIN_DIR = resolve(PACKAGE_ROOT, 'build', 'Release');
 
 const lowlevel = {} as any;
 dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.dlopen.RTLD_NOW);
