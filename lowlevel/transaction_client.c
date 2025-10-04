@@ -4,6 +4,7 @@
 
 #define _GNU_SOURCE // For memfd_create
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/limits.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -663,6 +664,24 @@ static void start_commit_worker(int socket_fd, const char *db_dir) {
 
 static int connect_to_commit_worker() {
     // LOG("Connecting to commit worker...");
+    
+    // Get the inode of data.mdb to uniquely identify this database
+    char data_mdb_path[PATH_MAX];
+    snprintf(data_mdb_path, sizeof(data_mdb_path), "%s/data.mdb", db_dir);
+    
+    // Ensure directory exists
+    mkdir(db_dir, 0755);
+    
+    // Ensure data.mdb exists (create empty file if needed) and get its inode
+    int data_fd = open(data_mdb_path, O_RDWR | O_CREAT, 0644);
+    struct stat st;
+    if (data_fd < 0 || fstat(data_fd, &st) < 0) {
+        if (data_fd >= 0) close(data_fd);
+        SET_ERROR("NO_COMMIT_WORKER", "Failed to access data.mdb: %s", strerror(errno));
+        return -1;
+    }
+    close(data_fd);
+    
     for(int retry_count = 0; retry_count < 10; retry_count++) {
         int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
         if (fd == -1) {
@@ -674,11 +693,12 @@ static int connect_to_commit_worker() {
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
         // The 0 byte indicates were using the Abstract Socket Namespace.
-        // The checksum is used to ensure that the socket name is unique for this database directory.
+        // We use device+inode to uniquely identify this database instance.
+        // If the database is deleted and recreated, it gets a new inode.
         // We prefer this over an actual socket file, as it avoids issues with stale socket files.
         // Also, we avoid the max 108 bytes path length issue for regular unix sockets.
         // This is Linux-specific though!
-        snprintf(addr.sun_path, sizeof(addr.sun_path), "%colmdb-%ld", 0, checksum(db_dir, strlen(db_dir), CHECKSUM_INITIAL));        
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%colmdb-%lu-%lu", 0, (unsigned long)st.st_dev, (unsigned long)st.st_ino);        
 
         // First try to bind, see if we can become the server
         if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
