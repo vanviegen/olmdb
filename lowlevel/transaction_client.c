@@ -319,13 +319,11 @@ static ltxn_t *id_to_open_ltxn(int ltxn_id) {
     return ltxn;
 }
 
-static void assign_rtxn_wrapper(ltxn_t *ltxn) {
-    ASSERT(ltxn->rtxn_wrapper == NULL);
+static rtxn_wrapper_t *obtain_rtxn_wrapper() {
     long long time = get_time_ms();
     if (time < current_rtxn_expire_time) {
         current_rtxn_wrapper->ref_count++;
-        ltxn->rtxn_wrapper = current_rtxn_wrapper;
-        return;
+        return current_rtxn_wrapper;
     }
     rtxn_wrapper_t *rtxn_wrapper = first_free_rtxn_wrapper;
     if (rtxn_wrapper) {
@@ -334,16 +332,18 @@ static void assign_rtxn_wrapper(ltxn_t *ltxn) {
     } else {
         if (next_unused_rtxn_wrapper >= MAX_RTXNS) {
             LOG_INTERNAL_ERROR("Exceeded maximum read transactions");
-            ltxn->rtxn_wrapper = current_rtxn_wrapper; // do *something*?!
-            return;
+            // do *something*?!
+            current_rtxn_wrapper->ref_count++;
+            return current_rtxn_wrapper; 
         }
         rtxn_wrapper = &rtxn_wrappers[next_unused_rtxn_wrapper++];
         int rc = mdb_txn_begin(dbenv, NULL, MDB_RDONLY, &rtxn_wrapper->rtxn);
         if (rc != MDB_SUCCESS) {
             LOG_INTERNAL_ERROR("Failed to create read transaction (%s)", mdb_strerror(rc));
             next_unused_rtxn_wrapper--;
-            ltxn->rtxn_wrapper = current_rtxn_wrapper; // do *something*?!
-            return;
+            // do *something*?!
+            current_rtxn_wrapper->ref_count++;
+            return current_rtxn_wrapper; 
         }
     }
     rtxn_wrapper->ref_count = 1;
@@ -351,24 +351,22 @@ static void assign_rtxn_wrapper(ltxn_t *ltxn) {
     rtxn_wrapper->commit_seq = (mdb_txn_id(rtxn_wrapper->rtxn)+1) * MAX_BATCHED_COMMITS;
     current_rtxn_wrapper = rtxn_wrapper;
     current_rtxn_expire_time = time + RTXN_SPAN_TIME_MS; // Share this read transaction with all logical transactions started within the next 100 ms
-    ltxn->rtxn_wrapper = rtxn_wrapper;
+    return rtxn_wrapper;
 }
 
-static void release_rtxn_wrapper(ltxn_t *ltxn) {
-    rtxn_wrapper_t *rtxn_wrapper = ltxn->rtxn_wrapper;
+static void release_rtxn_wrapper(rtxn_wrapper_t *rtxn_wrapper) {
     ASSERT_OR_RETURN(rtxn_wrapper != NULL,);
     if (--rtxn_wrapper->ref_count <= 0) {
+        mdb_txn_reset(rtxn_wrapper->rtxn);
         // Return to free list
         rtxn_wrapper->next_free = first_free_rtxn_wrapper;
         first_free_rtxn_wrapper = rtxn_wrapper;
-        mdb_txn_reset(rtxn_wrapper->rtxn);
         if (current_rtxn_wrapper == rtxn_wrapper) {
-            // If no other ltxns are using this, we might as well reset it
+            // Reset this, just to be sure
             current_rtxn_wrapper = NULL;
             current_rtxn_expire_time = 0;
         }
     }
-    ltxn->rtxn_wrapper = NULL;
 }
 
 // Find an available transaction slot
@@ -859,7 +857,7 @@ int start_transaction() {
     ltxn_t *ltxn = allocate_ltxn();
     if (!ltxn) return -1; // Error already set
     
-    assign_rtxn_wrapper(ltxn);
+    ltxn->rtxn_wrapper = obtain_rtxn_wrapper();
     
     // Combine index and nonce into transaction ID
     return ltxn_to_id(ltxn);
@@ -1171,7 +1169,8 @@ size_t commit_transaction(int ltxn_id) {
 
     size_t commit_seq = ltxn->rtxn_wrapper->commit_seq;
 
-    release_rtxn_wrapper(ltxn);
+    release_rtxn_wrapper(ltxn->rtxn_wrapper);
+    ltxn->rtxn_wrapper = NULL;
     
     if (!ltxn->has_writes) {
         // Read-only transaction, commit immediately
@@ -1260,7 +1259,8 @@ int abort_transaction(int ltxn_id) {
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
     if (!ltxn) return -1; // Error already set
     
-    release_rtxn_wrapper(ltxn);
+    release_rtxn_wrapper(ltxn->rtxn_wrapper);
+    ltxn->rtxn_wrapper = NULL;
     release_ltxn(ltxn);
     
     return 0;
