@@ -46,6 +46,14 @@ function runCallbacks(txn: Transaction, callbackList: "onRevertCallbacks" | "onC
 // Track if database has been initialized
 let isInitialized = false;
 
+/**
+ * When returned from a transaction function, indicates that the caller wants
+ * to receive the commit sequence number as the resolved value of the transact() promise.
+ * This can be useful for applications that need a globally unique, monotonically increasing
+ * identifier for each committed transaction.
+ */
+export const RETURN_COMMIT_SEQ = Symbol("RETURN_COMMIT_SEQ");
+
 async function tryTransaction(txn: Transaction) {
     txn.id = lowlevel.startTransaction();
     assert(txn.id >= 0, "Transaction ID should be valid 1");
@@ -71,7 +79,7 @@ async function tryTransaction(txn: Transaction) {
     if (typeof commitSeq === 'number' && commitSeq > 0) {
         // Execute onCommit callbacks outside transaction context
         runCallbacks(txn, "onCommitCallbacks", commitSeq);
-        txn.resolve(result);
+        txn.resolve(result === RETURN_COMMIT_SEQ ? commitSeq : result);
     } else {
         // Execute onRevert callbacks for retry failure
         runCallbacks(txn, "onRevertCallbacks", 0);
@@ -263,14 +271,14 @@ export function onCommit(callback: (commitSeq: number) => void): void {
  * or aborted if an error occurs. Failed transactions may be automatically retried
  * up to 6 times in case of validation conflicts.
  * 
- * @template T - The return type of the transaction function
- * @param fn - The function to execute within the transaction context
- * @returns A promise that resolves with the function's return value
- * @throws {TypeError} If nested transactions are attempted
- * @throws {DatabaseError} With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts
- * @throws {DatabaseError} With code "TRANSACTION_FAILED" if the transaction fails for other reasons
- * @throws {DatabaseError} With code "TXN_LIMIT" if maximum number of transactions is reached
- * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors
+ * @template T - The return type of the transaction function.
+ * @param fn - The (optionally asynchronous) function to execute within the transaction context.
+ * @returns A promise that resolves with the function's return value. If the function returns the special symbol `RETURN_COMMIT_SEQ`, the promise resolves with the commit sequence number instead.
+ * @throws {TypeError} If nested transactions are attempted.
+ * @throws {DatabaseError} With code "RACING_TRANSACTION" if the transaction fails after retries due to conflicts.
+ * @throws {DatabaseError} With code "TRANSACTION_FAILED" if the transaction fails for other reasons.
+ * @throws {DatabaseError} With code "TXN_LIMIT" if maximum number of transactions is reached.
+ * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
  * 
  * @example
  * ```typescript
@@ -283,10 +291,12 @@ export function onCommit(callback: (commitSeq: number) => void): void {
  * });
  * ```
  */
+export function transact<T>(fn: () => Promise<typeof RETURN_COMMIT_SEQ>): Promise<number>;
+export function transact<T>(fn: () => typeof RETURN_COMMIT_SEQ): Promise<number>;
 export function transact<T>(fn: () => Promise<T>): Promise<T>;
 export function transact<T>(fn: () => T): Promise<T>;
 
-export function transact<T>(fn: () => T): Promise<T> {
+export function transact<T>(fn: () => T): Promise<T | number>{
     // Auto-initialize if needed
     if (!isInitialized) init();
 
