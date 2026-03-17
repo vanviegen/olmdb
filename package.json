@@ -23,7 +23,6 @@
     "lowlevel"
   ],
   "scripts": {
-    "install": "node-gyp rebuild",
     "build": "rm -rf dist ; tsc",
     "test": "npm run test:bun && npm run test:node",
     "test:bun": "bun test",

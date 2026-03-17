@@ -1,4 +1,7 @@
 {
+  "make_global_settings": [
+    ["CXX", "/usr/bin/cc"]
+  ],
   "targets": [
     {
       "target_name": "transaction_client",
