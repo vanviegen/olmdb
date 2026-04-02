@@ -158,7 +158,7 @@ function toBuffer(key: Data): ArrayBufferLike {
  * @throws {DatabaseError} With code "KEY_TOO_LONG" if key exceeds maximum allowed length.
  * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
  */
-export function get(key: Data): Uint8Array | undefined {
+export function get(key: Data): Readonly<Uint8Array> | undefined {
     const result = lowlevel.get(getTransaction().id, toBuffer(key));
     return result && new Uint8Array(result);
 }
@@ -173,7 +173,7 @@ export function get(key: Data): Uint8Array | undefined {
  * @throws {DatabaseError} With code "KEY_TOO_LONG" if key exceeds maximum allowed length.
  * @throws {DatabaseError} With code "LMDB-{code}" for LMDB-specific errors.
  */
-export function getBuffer(key: Data): ArrayBuffer | undefined {
+export function getBuffer(key: Data): Readonly<ArrayBuffer> | undefined {
     return lowlevel.get(getTransaction().id, toBuffer(key));
 }
 
@@ -328,9 +328,9 @@ export interface DbEntry<K,V> {
  */
 export class DbIterator<K,V> extends Iterator<DbEntry<K,V>,undefined> implements Iterator<DbEntry<K,V>,undefined> {
     private iteratorId: number;
-    private convertKey: (buffer: ArrayBuffer) => K;
-    private convertValue: (buffer: ArrayBuffer) => V;
-    constructor(iteratorId: number, convertKey: (buffer: ArrayBuffer) => K, convertValue: (buffer: ArrayBuffer) => V) {
+    private convertKey: (buffer: Readonly<ArrayBuffer>) => K;
+    private convertValue: (buffer: Readonly<ArrayBuffer>) => V;
+    constructor(iteratorId: number, convertKey: (buffer: Readonly<ArrayBuffer>) => K, convertValue: (buffer: Readonly<ArrayBuffer>) => V) {
         super();
         this.iteratorId = iteratorId;
         this.convertKey = convertKey;
@@ -445,8 +445,8 @@ interface ScanOptions<K = Uint8Array,V = Uint8Array> {
     start?: Data; // Starting key for iteration
     end?: Data; // Ending key for iteration
     reverse?: boolean; // Whether to iterate in reverse order
-    keyConvert?: (buffer: ArrayBuffer) => K,
-    valueConvert?: (buffer: ArrayBuffer) => V,
+    keyConvert?: (buffer: Readonly<ArrayBuffer>) => K,
+    valueConvert?: (buffer: Readonly<ArrayBuffer>) => V,
 }
 
 /**
@@ -456,7 +456,7 @@ interface ScanOptions<K = Uint8Array,V = Uint8Array> {
  * @param buffer - The ArrayBuffer to convert.
  * @returns A new Uint8Array view of the buffer.
  */
-export function asArray(buffer: ArrayBuffer): Uint8Array { return new Uint8Array(buffer); }
+export function asArray(buffer: Readonly<ArrayBuffer>): Readonly<Uint8Array> { return new Uint8Array(buffer as ArrayBuffer); }
 
 /**
  * Returns the ArrayBuffer as-is.
@@ -465,7 +465,7 @@ export function asArray(buffer: ArrayBuffer): Uint8Array { return new Uint8Array
  * @param buffer - The ArrayBuffer to return.
  * @returns The same ArrayBuffer.
  */
-export function asBuffer(buffer: ArrayBuffer): ArrayBuffer { return buffer; }
+export function asBuffer(buffer: Readonly<ArrayBuffer>): Readonly<ArrayBuffer> { return buffer; }
 
 /**
  * Converts an ArrayBuffer to a UTF-8 decoded string.
@@ -474,5 +474,5 @@ export function asBuffer(buffer: ArrayBuffer): ArrayBuffer { return buffer; }
  * @param buffer - The ArrayBuffer to decode.
  * @returns A UTF-8 decoded string.
  */
-export function asString(buffer: ArrayBuffer): string { return decoder.decode(buffer); }
+export function asString(buffer: Readonly<ArrayBuffer>): string { return decoder.decode(buffer as ArrayBuffer); }
 

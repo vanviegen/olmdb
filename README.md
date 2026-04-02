@@ -348,7 +348,7 @@ Retrieves data from the current transaction context.
 
 Retrieves a value from the database by key within the current transaction.
 
-**Signature:** `(key: Data) => Uint8Array<ArrayBufferLike>`
+**Signature:** `(key: Data) => Readonly<Uint8Array<ArrayBufferLike>>`
 
 **Parameters:**
 
@@ -367,7 +367,7 @@ Retrieves a value from the database by key within the current transaction.
 
 Retrieves a value from the database by key within the current transaction.
 
-**Signature:** `(key: Data) => ArrayBuffer`
+**Signature:** `(key: Data) => Readonly<ArrayBuffer>`
 
 **Parameters:**
 
@@ -596,11 +596,11 @@ await transact(() => {
 Converts an ArrayBuffer to a Uint8Array.
 Helper function for use with scan() keyConvert and valueConvert options.
 
-**Signature:** `(buffer: ArrayBuffer) => Uint8Array<ArrayBufferLike>`
+**Signature:** `(buffer: Readonly<ArrayBuffer>) => Readonly<Uint8Array<ArrayBufferLike>>`
 
 **Parameters:**
 
-- `buffer: ArrayBuffer` - - The ArrayBuffer to convert.
+- `buffer: Readonly<ArrayBuffer>` - - The ArrayBuffer to convert.
 
 **Returns:** A new Uint8Array view of the buffer.
 
@@ -609,11 +609,11 @@ Helper function for use with scan() keyConvert and valueConvert options.
 Returns the ArrayBuffer as-is.
 Helper function for use with scan() keyConvert and valueConvert options.
 
-**Signature:** `(buffer: ArrayBuffer) => ArrayBuffer`
+**Signature:** `(buffer: Readonly<ArrayBuffer>) => Readonly<ArrayBuffer>`
 
 **Parameters:**
 
-- `buffer: ArrayBuffer` - - The ArrayBuffer to return.
+- `buffer: Readonly<ArrayBuffer>` - - The ArrayBuffer to return.
 
 **Returns:** The same ArrayBuffer.
 
@@ -622,11 +622,11 @@ Helper function for use with scan() keyConvert and valueConvert options.
 Converts an ArrayBuffer to a UTF-8 decoded string.
 Helper function for use with scan() keyConvert and valueConvert options.
 
-**Signature:** `(buffer: ArrayBuffer) => string`
+**Signature:** `(buffer: Readonly<ArrayBuffer>) => string`
 
 **Parameters:**
 
-- `buffer: ArrayBuffer` - - The ArrayBuffer to decode.
+- `buffer: Readonly<ArrayBuffer>` - - The ArrayBuffer to decode.
 
 **Returns:** A UTF-8 decoded string.
 
@@ -688,11 +688,11 @@ Database iterator that implements the standard TypeScript iterator protocol
 
 #### dbIterator.convertKey · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L331)
 
-**Type:** `(buffer: ArrayBuffer) => K`
+**Type:** `(buffer: Readonly<ArrayBuffer>) => K`
 
 #### dbIterator.convertValue · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L332)
 
-**Type:** `(buffer: ArrayBuffer) => V`
+**Type:** `(buffer: Readonly<ArrayBuffer>) => V`
 
 #### dbIterator.[Symbol.iterator] · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L340)
 
@@ -806,7 +806,7 @@ Aborts the transaction with the given ID, discarding all changes.
 
 Retrieves a value for the given key within a transaction.
 
-**Signature:** `(transactionId: number, key: ArrayBufferLike) => ArrayBuffer`
+**Signature:** `(transactionId: number, key: ArrayBufferLike) => Readonly<ArrayBuffer>`
 
 **Parameters:**
 
@@ -873,7 +873,7 @@ Creates an iterator for scanning a range of keys within a transaction.
 
 Reads the next key-value pair from an iterator.
 
-**Signature:** `(iteratorId: number) => { key: ArrayBuffer; value: ArrayBuffer; }`
+**Signature:** `(iteratorId: number) => Readonly<{ key: Readonly<ArrayBuffer>; value: Readonly<ArrayBuffer>; }>`
 
 **Parameters:**
 

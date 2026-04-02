@@ -77,7 +77,7 @@ export const abortTransaction = lowlevel.abortTransaction as (transactionId: num
 export const get = lowlevel.get as (
   transactionId: number, 
   key: ArrayBufferLike
-) => ArrayBuffer | undefined;
+) => Readonly<ArrayBuffer> | undefined;
 
 /**
  * Stores a key-value pair within a transaction.
@@ -131,7 +131,7 @@ export const createIterator = lowlevel.createIterator as (
  */
 export const readIterator = lowlevel.readIterator as (
   iteratorId: number
-) => { key: ArrayBuffer; value: ArrayBuffer } | undefined;
+) => Readonly<{ key: Readonly<ArrayBuffer>; value: Readonly<ArrayBuffer> }> | undefined;
 
 /**
  * Closes an iterator when it's no longer needed.
