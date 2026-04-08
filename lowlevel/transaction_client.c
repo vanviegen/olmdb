@@ -1244,6 +1244,11 @@ int get_commit_results(commit_result_t *results, int *result_count) {
         } else {
             results[index].ltxn_id = ltxn_to_id(ltxn);
             results[index].commit_seq = (ltxn->state == TRANSACTION_SUCCEEDED) ? ltxn->commit_seq : 0;
+            if (ltxn->state == TRANSACTION_SUCCEEDED) {
+                // A commit has landed; invalidate the cached read transaction so the next
+                // startTransaction() opens a fresh snapshot that sees the committed data.
+                current_rtxn_expire_time = 0;
+            }
             index++;
             release_ltxn(ltxn);
         }
