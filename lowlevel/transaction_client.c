@@ -292,7 +292,7 @@ static void release_ltxn(ltxn_t *ltxn) {
     release_ltxn_logs(ltxn);
     release_ltxn_iterators(ltxn);
     
-    ltxn->has_writes = 0;
+    ltxn->commit_mode = COMMIT_READONLY;
     
     // Return transaction to free list
     ltxn->state = TRANSACTION_FREE;
@@ -878,7 +878,7 @@ int put(int ltxn_id, const void *key_data, size_t key_size, const void *value_da
     if (!ltxn) return -1; // Error already set
     
     if (add_update_log(ltxn, key_size, key_data, value_size, value_data) < 0) return -1; // Error already set
-    ltxn->has_writes = 1;
+    ltxn->commit_mode = COMMIT_CLOSE;
     
     return 0;
 }
@@ -898,7 +898,7 @@ int del(int ltxn_id, const void *key_data, size_t key_size) {
     if (!ltxn) return -1; // Error already set
     
     if (add_update_log(ltxn, key_size, key_data, 0, NULL) < 0) return -1; // Error already set
-    ltxn->has_writes = 1;
+    ltxn->commit_mode = COMMIT_CLOSE;
     
     return 0;
 }
@@ -1163,26 +1163,31 @@ int close_iterator(int iterator_id) {
     return 0;
 }
 
-size_t commit_transaction(int ltxn_id) {
+size_t commit_transaction(int ltxn_id, int reopen) {
     ltxn_t *ltxn = id_to_open_ltxn(ltxn_id);
     if (!ltxn) return -1; // Error already set
 
     size_t commit_seq = ltxn->rtxn_wrapper->commit_seq;
+    
+    if (!ltxn->commit_mode) {
+        // Read-only transaction, commit immediately
+        if (!reopen) {
+            release_rtxn_wrapper(ltxn->rtxn_wrapper);
+            ltxn->rtxn_wrapper = NULL;
+            release_ltxn(ltxn);
+        }
+        return commit_seq; // No async work needed
+    }
 
     release_rtxn_wrapper(ltxn->rtxn_wrapper);
     ltxn->rtxn_wrapper = NULL;
-    
-    if (!ltxn->has_writes) {
-        // Read-only transaction, commit immediately
-        release_ltxn(ltxn);
-        return commit_seq; // No async work needed
-    }
 
     // Allow the read iterators to be recycled
     release_ltxn_iterators(ltxn);
     
     // Transaction has writes, prepare for async processing
     ltxn->state = TRANSACTION_COMMITTING;
+    ltxn->commit_mode = reopen ? COMMIT_REOPEN : COMMIT_CLOSE;
     
     // Add transaction to the queue
     ltxn->next = ltxn_commit_queue_head;
@@ -1250,7 +1255,16 @@ int get_commit_results(commit_result_t *results, int *result_count) {
                 current_rtxn_expire_time = 0;
             }
             index++;
-            release_ltxn(ltxn);
+            if (ltxn->commit_mode == COMMIT_REOPEN) {
+                // Refresh the transaction: clear logs, get a fresh read context
+                release_ltxn_logs(ltxn);
+                ltxn->commit_mode = COMMIT_READONLY;
+                current_rtxn_expire_time = 0; // Ensure we get a fresh read snapshot
+                ltxn->rtxn_wrapper = obtain_rtxn_wrapper();
+                ltxn->state = TRANSACTION_OPEN;
+            } else {
+                release_ltxn(ltxn);
+            }
         }
         ltxn = next;
     }

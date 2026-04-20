@@ -211,8 +211,8 @@ napi_value js_start_transaction(napi_env env, napi_callback_info info) {
 }
 
 napi_value js_commit_transaction(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1];
+    size_t argc = 2;
+    napi_value argv[2];
     int32_t ltxn_id;
 
     if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1 ||
@@ -221,7 +221,18 @@ napi_value js_commit_transaction(napi_env env, napi_callback_info info) {
         return NULL;
     }
     
-    size_t commit_seq = commit_transaction(ltxn_id);
+    // Optional second argument: reopen (boolean, defaults to false)
+    bool reopen = false;
+    if (argc >= 2) {
+        napi_get_value_bool(env, argv[1], &reopen);
+    }
+    
+    size_t commit_seq = commit_transaction(ltxn_id, reopen ? 1 : 0);
+
+    if (commit_seq == (size_t)-1) {
+        throw_database_error(env);
+        return NULL;
+    }
 
     // For read-only transactions (commit_seq > 0), return the number directly
     if (commit_seq > 0) {

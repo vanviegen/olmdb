@@ -100,7 +100,14 @@ typedef struct rtxn_wrapper_struct {
 typedef struct ltxn_struct {
     uint16_t nonce;
     uint8_t state; // TRANSACTION_*
-    uint8_t has_writes;
+    // How the transaction should be committed:
+    //   0 = COMMIT_READONLY  - no writes, commit seq returned synchronously
+    //   1 = COMMIT_CLOSE     - has writes, release transaction after commit
+    //   2 = COMMIT_REOPEN    - has writes, refresh transaction (new read context) after commit
+    uint8_t commit_mode;
+#define COMMIT_READONLY 0
+#define COMMIT_CLOSE    1
+#define COMMIT_REOPEN   2
 
     // Log buffer indices, point to memory within the shared memory area
     log_buffer_t *first_log_buffer;

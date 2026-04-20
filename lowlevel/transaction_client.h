@@ -58,13 +58,17 @@ int start_transaction();
  * @brief Commit a transaction.
  * 
  * @param ltxn_id Transaction ID to commit.
+ * @param reopen If non-zero, the transaction is kept open after committing.
+ *   For read-only transactions, the read context is unchanged.
+ *   For write transactions, the write and read logs are cleared and the read context
+ *   is refreshed to a snapshot that includes the committed writes (and any concurrent changes).
  * 
  * @return 0: The transaction has writes and was queued for asynchronous commit.
  *         >0: The transaction was read-only and was committed immediately, with this commit sequence number.
  * 
  * @error INVALID_TRANSACTION Transaction ID not found or already closed.
  */
-size_t commit_transaction(int ltxn_id);
+size_t commit_transaction(int ltxn_id, int reopen);
 
 /**
  * @brief Abort a transaction.

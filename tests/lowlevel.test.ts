@@ -393,4 +393,144 @@ describe('Lowlevel Tests', () => {
             await lowlevel.commitTransaction(txnId);
         });
     });
+
+    describe("commitTransaction with reopen", () => {
+        test("commits writes and allows continued reads", async () => {
+            const txn = lowlevel.startTransaction();
+            lowlevel.put(txn, stringToArrayBuffer("cw1"), stringToArrayBuffer("val1"));
+            
+            const commitSeq = await lowlevel.commitTransaction(txn, true);
+            expect(commitSeq).toBeGreaterThan(0);
+            
+            // After reopen commit, can read the committed data via the refreshed read context
+            const value = lowlevel.get(txn, stringToArrayBuffer("cw1"));
+            expect(value).toBeDefined();
+            expect(arrayBufferToString(value!)).toBe("val1");
+            
+            await lowlevel.commitTransaction(txn);
+        });
+
+        test("allows further writes after reopen commit", async () => {
+            const txn = lowlevel.startTransaction();
+            lowlevel.put(txn, stringToArrayBuffer("cw2"), stringToArrayBuffer("first"));
+            
+            await lowlevel.commitTransaction(txn, true);
+            
+            // Write more data after reopen commit
+            lowlevel.put(txn, stringToArrayBuffer("cw3"), stringToArrayBuffer("second"));
+            await lowlevel.commitTransaction(txn);
+            
+            // Verify both writes landed
+            const verify = lowlevel.startTransaction();
+            expect(arrayBufferToString(lowlevel.get(verify, stringToArrayBuffer("cw2"))!)).toBe("first");
+            expect(arrayBufferToString(lowlevel.get(verify, stringToArrayBuffer("cw3"))!)).toBe("second");
+            await lowlevel.commitTransaction(verify);
+        });
+
+        test("refreshed read context sees concurrent changes", async () => {
+            const txn = lowlevel.startTransaction();
+            lowlevel.put(txn, stringToArrayBuffer("cw4"), stringToArrayBuffer("mine"));
+            
+            // Another transaction commits concurrently
+            const other = lowlevel.startTransaction();
+            lowlevel.put(other, stringToArrayBuffer("cw5"), stringToArrayBuffer("theirs"));
+            await lowlevel.commitTransaction(other);
+            
+            // Before reopen commit, our txn can't see the other transaction's data (snapshot isolation)
+            expect(lowlevel.get(txn, stringToArrayBuffer("cw5"))).toBeUndefined();
+            
+            // After reopen commit, the refreshed read context sees the concurrent change
+            await lowlevel.commitTransaction(txn, true);
+            const value = lowlevel.get(txn, stringToArrayBuffer("cw5"));
+            expect(value).toBeDefined();
+            expect(arrayBufferToString(value!)).toBe("theirs");
+            
+            await lowlevel.commitTransaction(txn);
+        });
+
+        test("clears write log after reopen commit", async () => {
+            const txn = lowlevel.startTransaction();
+            lowlevel.put(txn, stringToArrayBuffer("cw6"), stringToArrayBuffer("original"));
+            
+            await lowlevel.commitTransaction(txn, true);
+            
+            // The committed data should be readable from the LMDB snapshot, not the skiplist
+            const value = lowlevel.get(txn, stringToArrayBuffer("cw6"));
+            expect(arrayBufferToString(value!)).toBe("original");
+            
+            // Overwrite and commit again
+            lowlevel.put(txn, stringToArrayBuffer("cw6"), stringToArrayBuffer("updated"));
+            await lowlevel.commitTransaction(txn);
+            
+            const verify = lowlevel.startTransaction();
+            expect(arrayBufferToString(lowlevel.get(verify, stringToArrayBuffer("cw6"))!)).toBe("updated");
+            await lowlevel.commitTransaction(verify);
+        });
+
+        test("returns 0 on conflict", async () => {
+            // Setup: create a key that both transactions will read and write
+            const setup = lowlevel.startTransaction();
+            lowlevel.put(setup, stringToArrayBuffer("cw7"), stringToArrayBuffer("initial"));
+            await lowlevel.commitTransaction(setup);
+            
+            const txn = lowlevel.startTransaction();
+            lowlevel.get(txn, stringToArrayBuffer("cw7")); // Read the key
+            
+            // Another transaction modifies the same key
+            const other = lowlevel.startTransaction();
+            lowlevel.put(other, stringToArrayBuffer("cw7"), stringToArrayBuffer("conflict"));
+            await lowlevel.commitTransaction(other);
+            
+            // Our write to the same key should conflict
+            lowlevel.put(txn, stringToArrayBuffer("cw7"), stringToArrayBuffer("ours"));
+            const commitSeq = await lowlevel.commitTransaction(txn, true);
+            expect(commitSeq).toBe(0);
+            
+            // Transaction is still open after a failed reopen commit
+            // The transaction's writes are cleared, so we see the latest state
+            const value = lowlevel.get(txn, stringToArrayBuffer("cw7"));
+            expect(arrayBufferToString(value!)).toBe("conflict");
+            
+            await lowlevel.commitTransaction(txn);
+        });
+
+        test("read-only reopen returns commit seq and keeps transaction open", async () => {
+            const txn = lowlevel.startTransaction();
+            
+            // No writes, just reopen
+            const commitSeq = lowlevel.commitTransaction(txn, true);
+            expect(typeof commitSeq).toBe("number");
+            expect(commitSeq).toBeGreaterThan(0);
+            
+            // Transaction is still usable
+            lowlevel.put(txn, stringToArrayBuffer("cw_ro"), stringToArrayBuffer("after_readonly"));
+            await lowlevel.commitTransaction(txn);
+            
+            const verify = lowlevel.startTransaction();
+            expect(arrayBufferToString(lowlevel.get(verify, stringToArrayBuffer("cw_ro"))!)).toBe("after_readonly");
+            await lowlevel.commitTransaction(verify);
+        });
+
+        test("multiple reopen commits in sequence", async () => {
+            const txn = lowlevel.startTransaction();
+            
+            lowlevel.put(txn, stringToArrayBuffer("cw8"), stringToArrayBuffer("batch1"));
+            const seq1 = await lowlevel.commitTransaction(txn, true);
+            expect(seq1).toBeGreaterThan(0);
+            
+            lowlevel.put(txn, stringToArrayBuffer("cw9"), stringToArrayBuffer("batch2"));
+            const seq2 = await lowlevel.commitTransaction(txn, true);
+            expect(seq2).toBeGreaterThan(seq1);
+            
+            lowlevel.put(txn, stringToArrayBuffer("cw10"), stringToArrayBuffer("batch3"));
+            await lowlevel.commitTransaction(txn);
+            
+            // Verify all three batches landed
+            const verify = lowlevel.startTransaction();
+            expect(arrayBufferToString(lowlevel.get(verify, stringToArrayBuffer("cw8"))!)).toBe("batch1");
+            expect(arrayBufferToString(lowlevel.get(verify, stringToArrayBuffer("cw9"))!)).toBe("batch2");
+            expect(arrayBufferToString(lowlevel.get(verify, stringToArrayBuffer("cw10"))!)).toBe("batch3");
+            await lowlevel.commitTransaction(verify);
+        });
+    });
 });

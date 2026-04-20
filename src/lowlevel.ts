@@ -52,11 +52,16 @@ export const startTransaction = lowlevel.startTransaction as () => number;
  * If the transaction has modifications, returns a Promise that resolves to the commit sequence when the commit completes.
  * 
  * @param transactionId The ID of the transaction to commit
+ * @param reopen If true, the transaction is kept open after committing.
+ *   For read-only transactions, the read context is unchanged and the commit sequence is returned synchronously.
+ *   For write transactions, the write and read logs are cleared and the read context
+ *   is refreshed to a snapshot that includes the committed writes (and any concurrent changes).
+ *   The transaction can then be used for further reads and writes.
  * @returns For read-only transactions: the commit sequence number (synchronous)
  *          For write transactions: a Promise that resolves to the commit sequence number (0 when the transaction failed due to conflicts)
  * @throws DatabaseError if the transaction cannot be committed
  */
-export const commitTransaction = lowlevel.commitTransaction as (transactionId: number) => number | Promise<number>;
+export const commitTransaction = lowlevel.commitTransaction as (transactionId: number, reopen?: boolean) => number | Promise<number>;
 
 /**
  * Aborts the transaction with the given ID, discarding all changes.
