@@ -139,9 +139,6 @@ typedef struct iterator_struct {
 
 // Shared functions and variables
 
-extern MDB_env *dbenv;
-extern MDB_dbi dbi;
-
 static inline int max(int a, int b) { return a > b ? a : b; }
 static inline int min(int a, int b) { return a < b ? a : b; }
 
@@ -151,7 +148,11 @@ static inline int compare_keys(uint16_t key1_size, const char *key1, uint16_t ke
     return res;
 }
 
-int init_lmdb(const char *db_dir);
+// Initialize an LMDB environment for the given directory. The returned dbenv
+// and dbi are written through the output pointers. Each transaction client
+// instance (and the commit worker daemon) calls this independently to obtain
+// its own LMDB handles.
+int init_lmdb(const char *db_dir, MDB_env **out_dbenv, MDB_dbi *out_dbi);
 int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse);
 uint64_t checksum(const char *data, size_t len, uint64_t val);
 char* format_binary_data(const void* data, size_t len);

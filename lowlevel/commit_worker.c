@@ -50,6 +50,12 @@ static int queued_commit_count = 0;
 static int epoll_fd = -1;
 int log_fd = -1; // 
 
+// LMDB environment owned by this commit worker daemon. The daemon services
+// many client processes and threads, but maintains a single LMDB env so it
+// can batch their write transactions into one LMDB write transaction.
+static MDB_env *dbenv;
+static MDB_dbi dbi;
+
 static void perform_queued_commits();
 static void handle_client_command(int client_fd);
 
@@ -80,7 +86,7 @@ int main(int argc, const char *argv[]) {
     log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 
     // Recreate dbenv for our new process
-    if (init_lmdb(db_dir) < 0) return 1;
+    if (init_lmdb(db_dir, &dbenv, &dbi) < 0) return 1;
 
     // Setup epoll
     epoll_fd = epoll_create1(0);

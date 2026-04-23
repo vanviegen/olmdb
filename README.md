@@ -287,7 +287,7 @@ The high-level API, written in TypeScript provides a `transact(func)` method tha
 After the provided function is done running, `transact()` does an OLMDB commit, and (for read/write transactions) registers a callback function. In case it gets called with a 'raced' status, the function will be executed again within a new transaction context. This happens up to six times before giving up.
 
 ### Scaling
-You can run as many JavaScript processes, and within each as many concurrent request handlers as you want. LMDB allows multiple processes (on the same machine) to safely run read-only transaction in the same database file simultaneously. All read/write operations are committed to LMDB by the single threaded commit worker daemon, which may be a bottleneck for write-heavy workloads, though it's highly efficient and sure therefore scale to thousands of transactions per second. 
+You can run as many JavaScript processes, and within each as many concurrent request handlers as you want. LMDB allows multiple processes (on the same machine) to safely run read-only transactions in the same database file simultaneously. You can also use Node.js / Bun Worker threads: every Worker must do its own `init()` and gets its own database connection. All read/write operations are committed to LMDB by the single threaded commit worker daemon, which may be a bottleneck for write-heavy workloads, though it's highly efficient and sure therefore scale to thousands of transactions per second. 
 
 In the `benchmark` directory you can find the start of a benchmarking suite to get some feel for performance.
 

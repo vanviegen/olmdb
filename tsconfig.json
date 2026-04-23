@@ -17,6 +17,7 @@
     "resolveJsonModule": true,
     "incremental": false,
     "sourceMap": true
+    ,"types": ["node", "bun"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist"]

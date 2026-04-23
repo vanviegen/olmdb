@@ -21,9 +21,16 @@ dlopen({exports: lowlevel}, `${BIN_DIR}/transaction_client.node`, os.constants.d
 
 /**
  * Initializes the database system with the specified directory.
- * 
- * Can be called multiple times if directory and commitWorkerBin are identical.
- * 
+ *
+ * Must be called once per JavaScript thread (i.e. once on the main thread
+ * and once inside each Node.js / Bun `Worker` that intends to use OLMDB).
+ * Each Worker gets its own independent native client, so concurrent
+ * transactions across Workers are safe; all clients in the same process that
+ * point at the same database directory share a single commit-worker daemon.
+ *
+ * Can be called multiple times within the same thread if directory and
+ * commitWorkerBin are identical.
+ *
  * @param directory Optional path to the database directory. If not provided,
  *   defaults to the OLMDB_DIR environment variable or "./.olmdb".
  * @param commitWorkerBin Path to the commit worker binary. Defaults to

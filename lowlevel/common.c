@@ -3,11 +3,11 @@
 
 #include "common.h"
 
-MDB_env *dbenv;
-MDB_dbi dbi;
 
+int init_lmdb(const char *db_dir, MDB_env **out_dbenv, MDB_dbi *out_dbi) {
+    MDB_env *dbenv = NULL;
+    MDB_dbi dbi = 0;
 
-int init_lmdb(const char *db_dir) {
     // Initialize LMDB environment
     int rc = mdb_env_create(&dbenv);
     if (rc != MDB_SUCCESS) {
@@ -18,7 +18,6 @@ int init_lmdb(const char *db_dir) {
     rc = mdb_env_set_mapsize(dbenv, 16ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL); // 16TB
     if (rc != MDB_SUCCESS) {
         mdb_env_close(dbenv);
-        dbenv = NULL;
         SET_LMDB_ERROR("set map size", rc);
         return -1;
     }
@@ -26,7 +25,6 @@ int init_lmdb(const char *db_dir) {
     rc = mdb_env_set_maxreaders(dbenv, 196);
     if (rc != MDB_SUCCESS) {
         mdb_env_close(dbenv);
-        dbenv = NULL;
         SET_LMDB_ERROR("set max readers", rc);
         return -1;
     }
@@ -34,7 +32,6 @@ int init_lmdb(const char *db_dir) {
     rc = mdb_env_open(dbenv, db_dir, MDB_NOTLS, 0664);
     if (rc != MDB_SUCCESS) {
         mdb_env_close(dbenv);
-        dbenv = NULL;
         SET_LMDB_ERROR("env init", rc);
         return -1;
     }
@@ -44,7 +41,6 @@ int init_lmdb(const char *db_dir) {
     rc = mdb_txn_begin(dbenv, NULL, 0, &wtxn);
     if (rc != MDB_SUCCESS) {
         mdb_env_close(dbenv);
-        dbenv = NULL;
         SET_LMDB_ERROR("dbi init txn begin", rc);
         return -1;
     }
@@ -53,7 +49,6 @@ int init_lmdb(const char *db_dir) {
     if (rc != MDB_SUCCESS) {
         mdb_txn_abort(wtxn);
         mdb_env_close(dbenv);
-        dbenv = NULL;
         SET_LMDB_ERROR("dbi init", rc);
         return -1;
     }
@@ -61,11 +56,12 @@ int init_lmdb(const char *db_dir) {
     rc = mdb_txn_commit(wtxn);
     if (rc != MDB_SUCCESS) {
         mdb_env_close(dbenv);
-        dbenv = NULL;
         SET_LMDB_ERROR("dbi init txn commit", rc);
         return -1;
     }
-    
+
+    *out_dbenv = dbenv;
+    *out_dbi = dbi;
     return 0;
 }
 
