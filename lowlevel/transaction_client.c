@@ -350,9 +350,11 @@ static ltxn_t *id_to_open_ltxn(transaction_client_t *client, int ltxn_id) {
     return ltxn;
 }
 
-static rtxn_wrapper_t *obtain_rtxn_wrapper(transaction_client_t *client) {
+static rtxn_wrapper_t *obtain_rtxn_wrapper(transaction_client_t *client, size_t min_commit_seq) {
     long long time = get_time_ms();
-    if (time < client->current_rtxn_expire_time) {
+    if (time < client->current_rtxn_expire_time
+            && client->current_rtxn_wrapper
+            && client->current_rtxn_wrapper->commit_seq > min_commit_seq) {
         client->current_rtxn_wrapper->ref_count++;
         return client->current_rtxn_wrapper;
     }
@@ -910,7 +912,7 @@ int start_transaction(transaction_client_t *client) {
     ltxn_t *ltxn = allocate_ltxn(client);
     if (!ltxn) return -1; // Error already set
 
-    ltxn->rtxn_wrapper = obtain_rtxn_wrapper(client);
+    ltxn->rtxn_wrapper = obtain_rtxn_wrapper(client, 0);
 
     // Combine index and nonce into transaction ID
     return ltxn_to_id(client, ltxn);
@@ -1303,17 +1305,19 @@ int get_commit_results(transaction_client_t *client, commit_result_t *results, i
             results[index].ltxn_id = ltxn_to_id(client, ltxn);
             results[index].commit_seq = (ltxn->state == TRANSACTION_SUCCEEDED) ? ltxn->commit_seq : 0;
             if (ltxn->state == TRANSACTION_SUCCEEDED) {
-                // A commit has landed; invalidate the cached read transaction so the next
-                // startTransaction() opens a fresh snapshot that sees the committed data.
-                client->current_rtxn_expire_time = 0;
+                // A commit has landed. If our cached read transaction does not yet cover
+                // this commit, invalidate it so the next startTransaction() or reopen gets
+                // a fresh-enough snapshot.
+                if (!client->current_rtxn_wrapper || client->current_rtxn_wrapper->commit_seq <= ltxn->commit_seq) {
+                    client->current_rtxn_expire_time = 0;
+                }
             }
             index++;
             if (ltxn->commit_mode == COMMIT_REOPEN) {
-                // Refresh the transaction: clear logs, get a fresh read context
+                // Refresh the transaction: clear logs, get a read context at or after our commit.
                 release_ltxn_logs(client, ltxn);
                 ltxn->commit_mode = COMMIT_READONLY;
-                client->current_rtxn_expire_time = 0; // Ensure we get a fresh read snapshot
-                ltxn->rtxn_wrapper = obtain_rtxn_wrapper(client);
+                ltxn->rtxn_wrapper = obtain_rtxn_wrapper(client, ltxn->commit_seq);
                 ltxn->state = TRANSACTION_OPEN;
             } else {
                 release_ltxn(client, ltxn);
