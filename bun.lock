@@ -6,12 +6,12 @@
       "name": "edinburgh",
       "dependencies": {
         "node-gyp": "^11.2.0",
-        "readme-tsdoc": "^1.1.4",
       },
       "devDependencies": {
         "@types/bun": "^1.2.16",
         "@types/node": "^22.10.6",
         "jest": "^30.0.3",
+        "readme-tsdoc": "^1.2.1",
         "tsdoc-markdown": "^1.2.0",
         "tsx": "^4.19.2",
         "typescript": "^5.7.3",
@@ -393,8 +393,6 @@
 
     "exponential-backoff": ["exponential-backoff@3.1.2", "", {}, "sha512-8QxYTVXUkuy7fIIoitQkPwGonB8F3Zj8eEO8Sqg9Zv/bkI7RJAzowee4gr81Hak/dUTpA2Z7VfQgoijjPNlUZA=="],
 
-    "fast-deep-copy": ["fast-deep-copy@1.0.1", "", {}, "sha512-x1pYV5SJ+VQ2lulFw+4qz/f5JHYKa+vIZYmNkzIQSVpW66aVD2tAyRX37gwj+sC/KK72BuMJVk5YKLBTT18ZQA=="],
-
     "fast-json-stable-stringify": ["fast-json-stable-stringify@2.1.0", "", {}, "sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw=="],
 
     "fb-watchman": ["fb-watchman@2.0.2", "", { "dependencies": { "bser": "2.1.1" } }, "sha512-p5161BqbuCaSnB8jIbzQHOlpgsPmK5rJVDfDKO91Axs5NC1uu3HRQm6wt9cd9/+GtQQIO53JdGXXoyDpTAsgYA=="],
@@ -639,7 +637,7 @@
 
     "react-is": ["react-is@18.3.1", "", {}, "sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg=="],
 
-    "readme-tsdoc": ["readme-tsdoc@1.1.4", "", { "dependencies": { "fast-deep-copy": "^1.0.1", "typescript": "^5.0.0" }, "bin": { "readme-tsdoc": "src/cli.js" } }, "sha512-GS+7QN9TPsMYWGLI+E8A6/068ZZPQXxqIfeWTuHCNN6+tuMvERdS1TQaStAh85tQxm8DGVP5f4OdFnkk3+dNwA=="],
+    "readme-tsdoc": ["readme-tsdoc@1.2.1", "", { "dependencies": { "typescript": "^5.0.0" }, "bin": { "readme-tsdoc": "src/cli.js" } }, "sha512-4VOvtrUYRvvvfxqwPAHSdZJRHPIbI+ghy2KbFaNUhCbTLbPxQbm5+0uogqI78NKAhVKaglq7Hp/7HVzWU3EjpQ=="],
 
     "require-directory": ["require-directory@2.1.1", "", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
 

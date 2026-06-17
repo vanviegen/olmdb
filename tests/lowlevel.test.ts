@@ -210,8 +210,10 @@ describe('Lowlevel Tests', () => {
             expect(arrayBufferToString(item!.key)).toBe("key3");
             lowlevel.closeIterator(iterId);
             
-            // Backward positioning
-            iterId = lowlevel.createIterator(txnId, stringToArrayBuffer("key4"), undefined, true);
+            // Backward positioning: the range is always [start, end) regardless of
+            // direction, and `reverse` only flips emission order. An exclusive upper
+            // bound of "key4" therefore begins reverse iteration at "key3".
+            iterId = lowlevel.createIterator(txnId, undefined, stringToArrayBuffer("key4"), true);
             item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key3");
             lowlevel.closeIterator(iterId);
@@ -362,33 +364,36 @@ describe('Lowlevel Tests', () => {
             }
             lowlevel.closeIterator(iterId);
             
-            // Reverse iteration with endKey
+            // Reverse iteration over the same half-open range [key2, key5): the
+            // start key is the inclusive lower bound and the end key the exclusive
+            // upper bound regardless of direction, so this yields key4, key3, key2
+            // (key5 excluded as the exclusive upper, key2 included as inclusive lower).
             iterId = lowlevel.createIterator(
                 txnId,
-                stringToArrayBuffer("key4"),
-                stringToArrayBuffer("key1"),
+                stringToArrayBuffer("key2"),
+                stringToArrayBuffer("key5"),
                 true
             );
-            
-            // Should get key4
+
+            // Should get key4 (key5 is excluded as the exclusive upper bound)
             item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key4");
-            
+
             // Should get key3
             item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key3");
-            
-            // Should get key2
+
+            // Should get key2 (the inclusive lower bound is still emitted)
             item = lowlevel.readIterator(iterId);
             expect(arrayBufferToString(item!.key)).toBe("key2");
-            
-            // Should stop before key1 (iterator respects endKey bound)
+
+            // Should stop before key1 (below the inclusive lower bound)
             item = lowlevel.readIterator(iterId);
             while (item !== undefined) {
                 expect(arrayBufferToString(item.key)).not.toBe("key1");
                 item = lowlevel.readIterator(iterId);
             }
-            
+
             lowlevel.closeIterator(iterId);
             await lowlevel.commitTransaction(txnId);
         });

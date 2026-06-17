@@ -1047,17 +1047,35 @@ int create_iterator(transaction_client_t *client, int ltxn_id,
     iterator_t *it = allocate_iterator(client, ltxn);
     if (!it) return -1; // Error already set
 
-    it->end_key_size = (uint16_t)end_key_size;
-    it->end_key_data = end_key_data;
+    // The iterator always covers the half-open range [start_key, end_key):
+    // start_key is the inclusive lower bound, end_key the exclusive upper bound.
+    // `reverse` only changes the emission order, not which bound is inclusive.
+    // Internally we begin the cursor at one end of the range and stop at the other:
+    //   forward: begin at start_key (inclusive),     stop at end_key (exclusive)
+    //   reverse: begin just below end_key (exclusive), stop at start_key (inclusive)
+    const void *begin_key_data = reverse ? end_key_data : start_key_data;
+    size_t begin_key_size      = reverse ? end_key_size : start_key_size;
+    const void *stop_key_data  = reverse ? start_key_data : end_key_data;
+    size_t stop_key_size       = reverse ? start_key_size : end_key_size;
+
+    it->end_key_size = (uint16_t)stop_key_size;
+    it->end_key_data = stop_key_data;
     it->next = ltxn->first_iterator;
     ltxn->first_iterator = it;
 
-    if (start_key_size > 0) {
-        it->current_update_log = find_update_log(ltxn, start_key_size, start_key_data, reverse ? 2 : 1);
-        it->lmdb_key.mv_data = (void*)start_key_data; // non-const, but LMDB doesn't modify it
-        it->lmdb_key.mv_size = start_key_size;
+    if (begin_key_size > 0) {
+        it->current_update_log = find_update_log(ltxn, begin_key_size, begin_key_data, reverse ? 2 : 1);
+        if (reverse && it->current_update_log &&
+            compare_keys(it->current_update_log->key_size, it->current_update_log->data,
+                         begin_key_size, begin_key_data) == 0) {
+            // Exclusive upper bound: an update-log entry sitting exactly on end_key
+            // must not be emitted, so step back to the previous entry.
+            it->current_update_log = it->current_update_log->prev_ptr;
+        }
+        it->lmdb_key.mv_data = (void*)begin_key_data; // non-const, but LMDB doesn't modify it
+        it->lmdb_key.mv_size = begin_key_size;
     } else {
-        // start at the first/last record
+        // begin at the first/last record
         it->current_update_log = reverse ? find_last_update_log(ltxn) : ltxn->update_log_skiplist_ptrs[0];
         it->lmdb_key.mv_data = NULL;
         it->lmdb_key.mv_size = 0;
@@ -1069,16 +1087,18 @@ int create_iterator(transaction_client_t *client, int ltxn_id,
         return -1;
     }
 
-    // Create read log with row_count indicating direction (positive for forward, negative for backward)
-    read_log_t *read_log = create_read_log(client, ltxn, sizeof(read_log_t) + start_key_size, reverse ? -1 : 1);
+    // Create read log with row_count indicating direction (positive for forward, negative for backward).
+    // The stored key is the begin key, so commit-time validation re-positions the
+    // cursor identically (via place_cursor) before replaying row_count rows.
+    read_log_t *read_log = create_read_log(client, ltxn, sizeof(read_log_t) + begin_key_size, reverse ? -1 : 1);
     if (!read_log) {
         // Error already set
         return -1;
     }
 
-    read_log->key_size = start_key_size;
-    if (start_key_size > 0) {
-        memcpy(read_log->key_data, start_key_data, start_key_size);
+    read_log->key_size = begin_key_size;
+    if (begin_key_size > 0) {
+        memcpy(read_log->key_data, begin_key_data, begin_key_size);
     }
     it->iterate_log = read_log;
 
@@ -1167,9 +1187,12 @@ restart_read_iterator:
     }
 
     if (it->end_key_data) {
+        // it->end_key_data is the stop bound: the exclusive upper bound when going
+        // forward (stop once key >= it), and the inclusive lower bound when going
+        // reverse (stop only once key < it, so the bound itself is still emitted).
         cmp = compare_keys(key.mv_size, key.mv_data, it->end_key_size, it->end_key_data);
-        if (reverse ? cmp <= 0 : cmp >= 0) {
-            // We're at or past end key. Mark iterator as done and return NULL.
+        if (reverse ? cmp < 0 : cmp >= 0) {
+            // We're at or past the stop key. Mark iterator as done and return NULL.
             it->current_update_log = NULL; // Mark log iterator as done
             it->lmdb_key.mv_data = NULL; // Mark LMDB cursor as done
             it->lmdb_key.mv_size = 0;

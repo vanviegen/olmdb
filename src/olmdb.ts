@@ -384,13 +384,18 @@ export class DbIterator<K,V> extends Iterator<DbEntry<K,V>,undefined> implements
  * Creates an iterator to scan through database entries within the current transaction.
  * 
  * The iterator implements the standard TypeScript iterator protocol and can be used with for...of loops.
- * Supports both forward and reverse iteration with optional start and end boundaries.
- * 
+ *
+ * The scan covers the half-open range `[start, end)` — `start` is the inclusive
+ * lower bound and `end` the exclusive upper bound. This holds regardless of
+ * direction: `reverse` only changes the order in which entries are emitted, not
+ * which bound is inclusive (so a reverse scan of `[start, end)` begins at the
+ * largest key below `end` and ends at `start`).
+ *
  * @template K - The type to convert keys to (defaults to Uint8Array).
  * @template V - The type to convert values to (defaults to Uint8Array).
  * @param opts - Configuration options for the scan operation.
- * @param opts.start - Optional starting key for iteration. If not provided, starts from the beginning/end.
- * @param opts.end - Optional ending key for iteration. Iteration stops before reaching this key.
+ * @param opts.start - Optional inclusive lower bound. If omitted, the range is open at the bottom.
+ * @param opts.end - Optional exclusive upper bound. If omitted, the range is open at the top.
  * @param opts.reverse - Whether to iterate in reverse order (defaults to false).
  * @param opts.keyConvert - Function to convert key ArrayBuffers to type K (defaults to asArray).
  * @param opts.valueConvert - Function to convert value ArrayBuffers to type V (defaults to asArray).

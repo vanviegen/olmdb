@@ -1,6 +1,6 @@
 {
   "name": "olmdb",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Optimistic LMDB. A very fast embedded key/value store featuring ACID optimistic read/write-transactions, based on LMDB.",
   "type": "module",
   "exports": {
@@ -53,10 +53,11 @@
     "jest": "^30.0.3",
     "tsdoc-markdown": "^1.2.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "readme-tsdoc": "^1.2.1"
   },
   "dependencies": {
-    "node-gyp": "^11.2.0",
-    "readme-tsdoc": "^1.1.4"
+    "node-gyp": "^11.2.0"
+    
   }
 }

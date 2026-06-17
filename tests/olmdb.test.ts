@@ -481,7 +481,7 @@ describe('LMDB', () => {
         expect(result).toEqual(new Uint8Array([3, 4, 5]));
     });
 
-    test("should scan reverse with from and til parameters", async () => {
+    test("should scan reverse with start and end parameters", async () => {
         await transact(() => {
             put('a-key', 'a-value');
             put('b-key', 'b-value');
@@ -489,10 +489,13 @@ describe('LMDB', () => {
             put('d-key', 'd-value');
             put('e-key', 'e-value');
         });
-        
+
+        // The range is always [start, end): start is the inclusive lower bound and
+        // end the exclusive upper bound, regardless of direction. `reverse` only
+        // flips the emission order, so ['c-key', 'e-key') yields d-key then c-key.
         const results = await transact(() => {
             const collected: Array<{ key: string, value: string }> = [];
-            for (const entry of scan({ start: 'd-key', end: 'b-key', reverse: true, keyConvert: asString, valueConvert: asString })) {
+            for (const entry of scan({ start: 'c-key', end: 'e-key', reverse: true, keyConvert: asString, valueConvert: asString })) {
                 collected.push({
                     key: entry.key,
                     value: entry.value
@@ -500,7 +503,7 @@ describe('LMDB', () => {
             }
             return collected;
         });
-        
+
         expect(results).toEqual([
             { key: 'd-key', value: 'd-value' },
             { key: 'c-key', value: 'c-value' }

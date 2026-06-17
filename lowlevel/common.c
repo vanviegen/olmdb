@@ -15,7 +15,10 @@ int init_lmdb(const char *db_dir, MDB_env **out_dbenv, MDB_dbi *out_dbi) {
         return -1;
     }
     
-    rc = mdb_env_set_mapsize(dbenv, 16ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL); // 16TB
+    const char *map_size_env = getenv("OLMDB_MAP_SIZE");
+    size_t map_size = map_size_env ? (size_t)strtoull(map_size_env, NULL, 10)
+                                   : (1ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL); // 1TB default
+    rc = mdb_env_set_mapsize(dbenv, map_size);
     if (rc != MDB_SUCCESS) {
         mdb_env_close(dbenv);
         SET_LMDB_ERROR("set map size", rc);
@@ -65,20 +68,27 @@ int init_lmdb(const char *db_dir, MDB_env **out_dbenv, MDB_dbi *out_dbi) {
     return 0;
 }
 
+// Positions `cursor` at the start of an iteration. The key passed in is the
+// half-open boundary the cursor begins at:
+//   forward: the inclusive lower bound -> first key >= in_key
+//   reverse: the exclusive upper bound -> largest key strictly < in_key
+// (`reverse` only ever begins from an exclusive upper bound, so an exact match
+// is stepped over rather than returned.)
 int place_cursor(MDB_cursor *cursor, MDB_val *key, MDB_val *value, int reverse) {
     MDB_val in_key;
     memcpy(&in_key, key, sizeof(MDB_val));
-    
+
     int cursor_mode = in_key.mv_size > 0 ? MDB_SET_RANGE : (reverse ? MDB_LAST : MDB_FIRST);
     int rc = mdb_cursor_get(cursor, key, value, cursor_mode);
-    
+
     if (in_key.mv_size > 0 && reverse) {
         if (rc == MDB_NOTFOUND) {
-            // If no next item was found, then the key we're looking for is the last item in the database
+            // in_key is past the last record, so the largest key < in_key is the last item
             rc = mdb_cursor_get(cursor, key, value, MDB_LAST);
-        } else if (rc == 0 && compare_keys(key->mv_size, key->mv_data, in_key.mv_size, in_key.mv_data) != 0) {
-            // If the key is not exactly matched, we need to move the cursor to the item that came *before*
-            rc = mdb_cursor_get(cursor, key, value, MDB_PREV);            
+        } else if (rc == 0) {
+            // SET_RANGE landed on the first key >= in_key; step back to the
+            // largest key strictly less than the exclusive upper bound.
+            rc = mdb_cursor_get(cursor, key, value, MDB_PREV);
         }
     }
     

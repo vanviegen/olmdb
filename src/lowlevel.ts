@@ -119,10 +119,17 @@ export const del = lowlevel.del as (
 
 /**
  * Creates an iterator for scanning a range of keys within a transaction.
- * 
+ *
+ * The iterator covers the half-open range `[startKey, endKey)` — `startKey` is
+ * the inclusive lower bound and `endKey` the exclusive upper bound. This holds
+ * regardless of direction: `reverse` only changes the order in which keys are
+ * emitted, not which bound is inclusive. So a forward scan yields the range
+ * ascending starting at `startKey`, while a reverse scan yields the same range
+ * descending starting at the largest key below `endKey`.
+ *
  * @param transactionId The ID of the transaction
- * @param startKey Optional key to start iteration from (inclusive)
- * @param endKey Optional key to end iteration at (exclusive)
+ * @param startKey Optional inclusive lower bound (defaults to the first key)
+ * @param endKey Optional exclusive upper bound (defaults to past the last key)
  * @param reverse If true, keys are returned in descending order
  * @returns An iterator ID to be used with readIterator() and closeIterator()
  * @throws DatabaseError if the operation fails
