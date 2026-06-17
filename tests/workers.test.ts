@@ -87,7 +87,15 @@ describe("Multi-Worker thread safety", () => {
         expect(verB.foundOwn).toBe(RECORDS_PER_WORKER);
         expect(verB.foundOther).toBe(RECORDS_PER_WORKER);
 
-        await a.worker.terminate();
-        await b.worker.terminate();
+        // Tell the workers they may exit now (we've received their results), then
+        // wait for them to exit on their own. We deliberately avoid
+        // worker.terminate(), which can hang under Bun for a worker that loaded
+        // the native addon.
+        a.worker.postMessage("exit");
+        b.worker.postMessage("exit");
+        await Promise.all([
+            new Promise<void>((r) => a.worker.once("exit", () => r())),
+            new Promise<void>((r) => b.worker.once("exit", () => r())),
+        ]);
     }, 60000);
 });

@@ -37,6 +37,18 @@ interface Msg { dbDir: string; prefix: string; otherPrefix: string; recordCount:
         }
         lowlevel.commitTransaction(txn);
         port.postMessage({ phase: "verified", foundOwn, foundOther });
+
+        // Wait for the parent to acknowledge it received "verified", then exit
+        // ourselves. Two failure modes this avoids:
+        //  - The parent must NOT call worker.terminate(): under Bun, terminate()
+        //    on a worker that loaded the native addon intermittently hangs (the
+        //    parent spins with no OLMDB code on any stack), timing the test out.
+        //  - We must NOT process.exit() immediately after postMessage either:
+        //    under Node the in-flight "verified" message can be dropped when the
+        //    worker exits, so the parent never sees it. Exiting only after the
+        //    parent's ack guarantees the message was delivered on both runtimes.
+        await new Promise<void>((r) => port.once("message", () => r()));
+        process.exit(0);
     } catch (e: any) {
         port.postMessage({ phase: "error", error: String(e?.stack || e) });
     }

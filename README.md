@@ -531,12 +531,17 @@ const result = await transact(() => {
 });
 ```
 
-### scan · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L435)
+### scan · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L440)
 
 Creates an iterator to scan through database entries within the current transaction.
 
 The iterator implements the standard TypeScript iterator protocol and can be used with for...of loops.
-Supports both forward and reverse iteration with optional start and end boundaries.
+
+The scan covers the half-open range `[start, end)` — `start` is the inclusive
+lower bound and `end` the exclusive upper bound. This holds regardless of
+direction: `reverse` only changes the order in which entries are emitted, not
+which bound is inclusive (so a reverse scan of `[start, end)` begins at the
+largest key below `end` and ends at `start`).
 
 **Signature:** `<K = Uint8Array<ArrayBufferLike>, V = Uint8Array<ArrayBufferLike>>(opts?: ScanOptions<K, V>) => DbIterator<K, V>`
 
@@ -591,7 +596,7 @@ await transact(() => {
 });
 ```
 
-### asArray · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L459)
+### asArray · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L464)
 
 Converts an ArrayBuffer to a Uint8Array.
 Helper function for use with scan() keyConvert and valueConvert options.
@@ -604,7 +609,7 @@ Helper function for use with scan() keyConvert and valueConvert options.
 
 **Returns:** A new Uint8Array view of the buffer.
 
-### asBuffer · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L468)
+### asBuffer · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L473)
 
 Returns the ArrayBuffer as-is.
 Helper function for use with scan() keyConvert and valueConvert options.
@@ -617,7 +622,7 @@ Helper function for use with scan() keyConvert and valueConvert options.
 
 **Returns:** The same ArrayBuffer.
 
-### asString · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L477)
+### asString · [function](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L482)
 
 Converts an ArrayBuffer to a UTF-8 decoded string.
 Helper function for use with scan() keyConvert and valueConvert options.
@@ -630,7 +635,7 @@ Helper function for use with scan() keyConvert and valueConvert options.
 
 **Returns:** A UTF-8 decoded string.
 
-### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L186)
+### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L196)
 
 The DatabaseError class is used to represent errors that occur during database operations.
 It extends the built-in Error class and has a machine readable error code string property.
@@ -682,33 +687,15 @@ Database iterator that implements the standard TypeScript iterator protocol
 - `K`
 - `V`
 
-#### dbIterator.iteratorId · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L330)
-
-**Type:** `number`
-
-#### dbIterator.convertKey · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L331)
-
-**Type:** `(buffer: Readonly<ArrayBuffer>) => K`
-
-#### dbIterator.convertValue · [property](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L332)
-
-**Type:** `(buffer: Readonly<ArrayBuffer>) => V`
-
 #### dbIterator.[Symbol.iterator] · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L340)
 
 **Signature:** `() => DbIterator<K, V>`
-
-**Parameters:**
-
 
 #### dbIterator.next · [method](https://github.com/vanviegen/olmdb/blob/main/src/olmdb.ts#L351)
 
 Advances the iterator to the next key-value pair.
 
 **Signature:** `() => IteratorResult<DbEntry<K, V>, any>`
-
-**Parameters:**
-
 
 **Returns:** An IteratorResult with the next DbEntry or done: true if no more entries.
 
@@ -723,9 +710,6 @@ Closes the iterator and frees its resources.
 Should be called when done iterating to prevent resource leaks.
 
 **Signature:** `() => void`
-
-**Parameters:**
-
 
 **Throws:**
 
@@ -862,17 +846,24 @@ Deletes a key-value pair within a transaction.
 
 - DatabaseError if the operation fails
 
-### createIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L130)
+### createIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L137)
 
 Creates an iterator for scanning a range of keys within a transaction.
+
+The iterator covers the half-open range `[startKey, endKey)` — `startKey` is
+the inclusive lower bound and `endKey` the exclusive upper bound. This holds
+regardless of direction: `reverse` only changes the order in which keys are
+emitted, not which bound is inclusive. So a forward scan yields the range
+ascending starting at `startKey`, while a reverse scan yields the same range
+descending starting at the largest key below `endKey`.
 
 **Signature:** `(transactionId: number, startKey?: ArrayBufferLike, endKey?: ArrayBufferLike, reverse?: boolean) => number`
 
 **Parameters:**
 
 - `transactionId` - The ID of the transaction
-- `startKey` - Optional key to start iteration from (inclusive)
-- `endKey` - Optional key to end iteration at (exclusive)
+- `startKey` - Optional inclusive lower bound (defaults to the first key)
+- `endKey` - Optional exclusive upper bound (defaults to past the last key)
 - `reverse` - If true, keys are returned in descending order
 
 **Returns:** An iterator ID to be used with readIterator() and closeIterator()
@@ -881,7 +872,7 @@ Creates an iterator for scanning a range of keys within a transaction.
 
 - DatabaseError if the operation fails
 
-### readIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L144)
+### readIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L151)
 
 Reads the next key-value pair from an iterator.
 
@@ -897,7 +888,7 @@ Reads the next key-value pair from an iterator.
 
 - DatabaseError if the operation fails
 
-### closeIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L154)
+### closeIterator · [function](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L161)
 
 Closes an iterator when it's no longer needed.
 
@@ -911,7 +902,7 @@ Closes an iterator when it's no longer needed.
 
 - DatabaseError if the operation fails
 
-### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L191)
+### DatabaseError · [constant](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L198)
 
 The DatabaseError class is used to represent errors that occur during database operations.
 It extends the built-in Error class and has a machine readable error code string property.
@@ -921,15 +912,15 @@ Invalid function arguments will throw TypeError.
 
 **Value:** `DatabaseErrorConstructor`
 
-### DatabaseErrorConstructor · [interface](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L173)
+### DatabaseErrorConstructor · [interface](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L180)
 
 Constructor interface for DatabaseError.
 
-#### databaseErrorConstructor.new · [constructor](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L180)
+#### databaseErrorConstructor.new · [constructor](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L187)
 
 Creates a new DatabaseError with the specified message and code.
 
-#### databaseErrorConstructor.prototype · [member](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L181)
+#### databaseErrorConstructor.prototype · [member](https://github.com/vanviegen/olmdb/blob/main/src/lowlevel.ts#L188)
 
 **Type:** `DatabaseError`
 
